@@ -1,0 +1,990 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stock — EGX Decision Engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/app.css">
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<div class="app">
+  <aside id="sidebar"></aside>
+  <div class="main">
+    <header id="topbar"></header>
+    <main class="content">
+
+      <div class="stock-head" id="stock-head">
+        <span class="sh-sym" id="sh-sym">—</span>
+        <span class="sh-price" id="sh-price">—</span>
+        <span class="sh-chg" id="sh-chg">—</span>
+        <span id="sh-signal"></span>
+        <button class="star-btn" id="star-btn" title="Toggle watchlist">☆</button>
+      </div>
+
+      <div class="grid grid-main">
+        <div style="min-width:0">
+          <div class="card">
+            <div class="card-title"><span>Price · 1Y daily</span><span class="as-of muted" id="chart-note"></span></div>
+            <div class="chart-box" id="chart"><div class="loading-pill">Loading chart…</div></div>
+          </div>
+
+          <div class="card">
+            <div class="card-title"><span>Multi-timeframe alignment</span></div>
+            <div id="mtf-box"></div>
+          </div>
+
+          <div class="card">
+            <div class="tabs" id="tabs">
+              <button class="tab-btn active" data-tab="smart">Smart Money</button>
+              <button class="tab-btn" data-tab="fib">Fibonacci</button>
+              <button class="tab-btn" data-tab="news">News</button>
+              <button class="tab-btn" data-tab="debate">Debate</button>
+              <button class="tab-btn" data-tab="thesis">Thesis</button>
+            </div>
+            <div class="tab-pane active" id="pane-smart"></div>
+            <div class="tab-pane" id="pane-fib"></div>
+            <div class="tab-pane" id="pane-news"></div>
+            <div class="tab-pane" id="pane-debate">
+              <div id="debate-rules"></div>
+              <div style="margin:12px 0 8px">
+                <button class="btn small" id="btn-debate">Run AI bull/bear debate</button>
+                <span class="muted" style="font-size:11.5px;margin-left:8px">LLM call — adversarial bear case, grounded in this page's data</span>
+              </div>
+              <div id="debate-llm"></div>
+            </div>
+            <div class="tab-pane" id="pane-thesis">
+              <div style="margin-bottom:10px"><button class="btn small" id="btn-thesis">Generate thesis</button></div>
+              <div id="thesis-box"></div>
+            </div>
+          </div>
+        </div>
+
+        <div style="min-width:0">
+          <div class="card">
+            <div class="card-title"><span>Score</span></div>
+            <div id="score-box"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-title"><span>Trade plan</span></div>
+            <div id="plan-box"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-title"><span>Position size</span></div>
+            <div class="form-row" style="margin-bottom:10px">
+              <div class="field"><label>Account (EGP)</label><input type="number" id="ps-account" value="100000" min="0" step="1000"></div>
+              <div class="field"><label>Risk %</label><input type="number" id="ps-risk" value="1" min="0.1" step="0.1"></div>
+            </div>
+            <div class="form-row" style="margin-bottom:10px">
+              <div class="field"><label>Entry</label><input type="number" id="ps-entry" step="0.01"></div>
+              <div class="field"><label>Stop</label><input type="number" id="ps-stop" step="0.01"></div>
+            </div>
+            <button class="btn primary" id="ps-btn">Size position</button>
+            <div id="ps-result" style="margin-top:10px"></div>
+          </div>
+        </div>
+      </div>
+
+    </main>
+    <footer class="footer">
+      <span>Analysis tooling — not financial advice. Data delayed ~15 min.</span>
+      <span class="muted">EGX Decision Engine · local</span>
+    </footer>
+  </div>
+</div>
+
+<script src="assets/api.js"></script>
+<script src="assets/ui.js"></script>
+<script src="assets/charts.js"></script>
+<script>
+(function () {
+  "use strict";
+  var U = window.UI;
+
+  var SYMBOL = (new URLSearchParams(window.location.search).get("symbol") || "")
+    .trim().toUpperCase().replace(/^EGX:/, "");
+
+  var state = { detail: null, plan: null, inWatchlist: false, tabLoaded: {} };
+
+  var ENTRY_KEYS = ["entry", "entry_price", "buy_price", "buy_at", "entry_level", "buy"];
+  var STOP_KEYS = ["stop", "stop_loss", "sl", "stoploss", "stop_price", "stop_level"];
+  var T1_KEYS = ["target1", "t1", "tp1", "target_1", "take_profit_1", "first_target", "target"];
+  var T2_KEYS = ["target2", "t2", "tp2", "target_2", "take_profit_2", "second_target"];
+
+  document.addEventListener("DOMContentLoaded", function () {
+    renderSidebar("");
+    renderTopbar(SYMBOL ? SYMBOL + " — Stock" : "Stock");
+    renderMobileNav("");
+    if (!SYMBOL) {
+      document.querySelector(".content").innerHTML = "";
+      document.querySelector(".content").appendChild(
+        U.errorBox("No symbol given. Open this page as stock.html?symbol=COMI, or use the search box above."));
+      return;
+    }
+    document.title = SYMBOL + " — EGX Decision Engine";
+    document.getElementById("sh-sym").textContent = SYMBOL;
+
+    loadDetail();
+    loadChart();
+    loadMtf();
+    loadWatchlistState();
+    setupTabs();
+    loadTab("smart");
+
+    // Sizer defaults come from .env (ACCOUNT_SIZE / RISK_PCT), not a
+    // hardcoded 100,000 — a wrong account size silently mis-sizes every trade.
+    API.get("/api/portfolio/config").then(function (cfg) {
+      if (cfg && isFinite(Number(cfg.account_size))) {
+        document.getElementById("ps-account").value = Number(cfg.account_size);
+      }
+      if (cfg && isFinite(Number(cfg.risk_pct))) {
+        document.getElementById("ps-risk").value = Number(cfg.risk_pct);
+      }
+    }).catch(function () { /* keep the field's fallback */ });
+
+    document.getElementById("star-btn").addEventListener("click", toggleWatchlist);
+    document.getElementById("ps-btn").addEventListener("click", sizePosition);
+    document.getElementById("btn-thesis").addEventListener("click", generateThesis);
+    document.getElementById("btn-debate").addEventListener("click", generateDebate);
+  });
+
+  /* ================= detail: header, score, plan ================= */
+
+  function loadDetail() {
+    var scoreBox = document.getElementById("score-box");
+    var planBox = document.getElementById("plan-box");
+    U.clear(scoreBox).appendChild(U.skeleton(4));
+    U.clear(planBox).appendChild(U.skeleton(4));
+
+    API.get("/api/stocks/" + encodeURIComponent(SYMBOL)).then(function (detail) {
+      state.detail = detail || {};
+      renderHeader(state.detail);
+      renderScore(scoreBox, state.detail);
+      renderPlan(planBox, state.detail);
+      applyPlanOverlays();
+      prefillSizer();
+    }).catch(function (e) {
+      U.clear(scoreBox).appendChild(U.errorBox("Analysis: " + e.message));
+      U.clear(planBox).appendChild(U.errorBox("Trade plan: " + e.message));
+      document.getElementById("sh-chg").textContent = "";
+      document.getElementById("sh-price").textContent = "—";
+    });
+  }
+
+  function analysisOf(detail) {
+    return U.pick(detail, ["analysis", "ta", "technical", "technical_analysis", "coin_analysis"]) || detail;
+  }
+
+  function planOf(detail) {
+    var p = U.pick(detail, ["trade_plan", "plan", "tradePlan", "egx_trade_plan", "trade"]);
+    if (p && typeof p === "object" && !p.error) return p;
+    return U.findObjWith(detail, ["entry", "stop"]) || U.findObjWith(detail, ["entry_price", "stop_loss"]) || p;
+  }
+
+  function fibOf(detail) {
+    return U.pick(detail, ["fibonacci", "fib", "fibonacci_analysis", "fib_analysis"]);
+  }
+
+  function deepPickNum(detail, keys) {
+    var a = analysisOf(detail);
+    var v = U.pickNum(a, keys);
+    if (v !== null) return v;
+    v = U.pickNum(detail, keys);
+    if (v !== null) return v;
+    var holder = U.findObjWith(detail, [keys[0]]);
+    return holder ? U.pickNum(holder, keys) : null;
+  }
+
+  function renderHeader(detail) {
+    var price = deepPickNum(detail, U.KEYS.PRICE);
+    var chg = deepPickNum(detail, U.KEYS.CHANGE);
+    document.getElementById("sh-price").textContent = price === null ? "—" : fmtNum(price);
+    var chgEl = document.getElementById("sh-chg");
+    chgEl.textContent = "";
+    chgEl.appendChild(fmtPct(chg));
+
+    // Real shape: analysis.market_sentiment.buy_sell_signal (analyze_coin);
+    // fall back to trade_plan.recommendation, then the generic shallow picks.
+    var analysis = analysisOf(detail);
+    var ms = (analysis && typeof analysis === "object") ? analysis.market_sentiment : null;
+    var sig = (ms && typeof ms === "object") ? U.pick(ms, ["buy_sell_signal", "overall_rating"]) : null;
+    if (sig === null || sig === undefined) {
+      var plan = planOf(detail);
+      if (plan && typeof plan === "object" && !plan.error && typeof plan.recommendation === "string") {
+        sig = plan.recommendation.split("—")[0].trim();
+      }
+    }
+    if (sig === null || sig === undefined) {
+      sig = U.pick(analysis, U.KEYS.SIGNAL) || U.pick(detail, U.KEYS.SIGNAL);
+    }
+    var host = document.getElementById("sh-signal");
+    host.textContent = "";
+    if (sig !== null && sig !== undefined && typeof sig !== "object") {
+      var txt = String(sig);
+      var cls = /buy|bull|strong/i.test(txt) ? "buy" : (/sell|bear|weak/i.test(txt) ? "sell" : "neutral");
+      host.appendChild(el("span", { class: "badge " + cls, text: txt }));
+    }
+  }
+
+  /* ---------- score card ---------- */
+
+  function renderScore(box, detail) {
+    U.clear(box);
+    var total = null, components = null, grade = null;
+
+    // Real shape: live score at analysis.stock_score (analyze_coin) with a
+    // fallback to trade_plan.stock_score; sub-scores at trade_plan.score_breakdown.
+    var analysis = analysisOf(detail);
+    var plan = planOf(detail);
+    var planOk = plan && typeof plan === "object" && !plan.error;
+    total = U.pickNum(analysis, ["stock_score"]);
+    if (total === null && planOk) total = U.toNum(plan.stock_score);
+    var breakdown = (planOk && plan.score_breakdown) ||
+      (analysis && typeof analysis === "object" ? analysis.score_breakdown : null);
+    if (breakdown && typeof breakdown === "object" && !Array.isArray(breakdown)) components = breakdown;
+    grade = U.pick(analysis, ["grade"]) || (planOk ? plan.grade : null);
+
+    // Generic fallbacks for older/other payload shapes.
+    var sc = U.pick(detail, ["score", "stock_score", "scores", "score_card", "scoring"]);
+    if (total === null) {
+      if (typeof sc === "number") total = sc;
+      else if (sc && typeof sc === "object") {
+        total = U.pickNum(sc, ["total", "score", "overall", "total_score", "value"]);
+        if (!components) {
+          components = U.pick(sc, ["components", "breakdown", "sub_scores", "subscores", "details"]);
+          if (!components) {
+            components = {};
+            for (var k in sc) {
+              if (typeof sc[k] === "number" && !/total|overall|score$/i.test(k)) components[k] = sc[k];
+            }
+            if (!Object.keys(components).length) components = null;
+          }
+        }
+      }
+    }
+    if (total === null) total = deepPickNum(detail, ["stock_score", "score", "total_score", "rating_score"]);
+
+    if (total === null && !components) {
+      box.appendChild(sc ? U.renderObject(sc) : el("div", { class: "empty-note", text: "No score available." }));
+      return;
+    }
+
+    if (total !== null) {
+      var cls = total >= 70 ? "up" : total >= 45 ? "warn-text" : "down";
+      var headRow = [
+        el("span", { class: "score-big " + cls, text: fmtNum(total, total % 1 ? 1 : 0) }),
+        el("span", { class: "muted", text: "/ 100" }),
+      ];
+      if (grade !== null && grade !== undefined && typeof grade !== "object") {
+        headRow.push(el("span", { class: "badge accent", text: String(grade) }));
+      }
+      box.appendChild(el("div", { style: { display: "flex", alignItems: "baseline", gap: "8px", marginBottom: "12px" } }, headRow));
+    }
+
+    if (components && typeof components === "object" && !Array.isArray(components)) {
+      var vals = [];
+      for (var ck in components) if (typeof U.toNum(components[ck]) === "number") vals.push(U.toNum(components[ck]));
+      var maxRef = Math.max.apply(null, vals.concat([1]));
+      if (maxRef <= 1.2) maxRef = 1; else if (maxRef <= 10) maxRef = 10; else if (maxRef <= 25) maxRef = 25; else maxRef = 100;
+      var bars = el("div", { class: "score-bars" });
+      for (var key in components) {
+        var v = U.toNum(components[key]);
+        if (v === null) continue;
+        var pct = Math.max(0, Math.min(100, (v / maxRef) * 100));
+        var fillCls = pct >= 66 ? "" : pct >= 40 ? "mid" : "low";
+        bars.appendChild(el("div", { class: "score-bar-row" }, [
+          el("div", { class: "score-bar-label", title: key, text: key.replace(/[_-]+/g, " ") }),
+          el("div", { class: "score-bar-track" }, el("div", { class: "score-bar-fill " + fillCls, style: { width: pct.toFixed(0) + "%" } })),
+          el("div", { class: "score-bar-val", text: fmtNum(v, v % 1 ? 1 : 0) }),
+        ]));
+      }
+      box.appendChild(bars);
+    }
+  }
+
+  /* ---------- trade plan card ---------- */
+
+  /** The trade_setup sub-dict of an egx_service trade plan, if present. */
+  function setupOf(plan) {
+    return (plan && typeof plan === "object" && plan.trade_setup &&
+            typeof plan.trade_setup === "object" && !plan.trade_setup.error)
+      ? plan.trade_setup : null;
+  }
+
+  function scenarioLevels(sc, name) {
+    if (!sc || typeof sc !== "object") return null;
+    var tg = sc.targets && typeof sc.targets === "object" ? sc.targets : {};
+    var rr = sc.risk_reward && typeof sc.risk_reward === "object" ? sc.risk_reward : {};
+    return {
+      entry: U.toNum(sc.entry), stop: U.toNum(sc.stop_loss),
+      t1: U.toNum(tg.target_1), t2: U.toNum(tg.target_2),
+      rr1: U.toNum(rr.to_target_1), rr2: U.toNum(rr.to_target_2),
+      scenario: name || sc.type || null,
+    };
+  }
+
+  function planLevels(plan) {
+    if (!plan || typeof plan !== "object") return { entry: null, stop: null, t1: null, t2: null, rr1: null, rr2: null, scenario: null };
+    var ts = setupOf(plan);
+
+    // Preferred shape: trade_setup.scenarios[primary_scenario] — each scenario
+    // carries an entry-anchored stop, targets and R:R (always stop < entry).
+    var scen = ts && ts.scenarios && typeof ts.scenarios === "object" ? ts.scenarios : null;
+    var pname = ts && typeof ts.primary_scenario === "string" ? ts.primary_scenario : null;
+    var primary = scenarioLevels(scen && pname ? scen[pname] : null, pname);
+    if (primary && primary.entry !== null && primary.stop !== null) return primary;
+
+    // Legacy shape: flat trade_setup fields (older core versions).
+    var ep = ts && ts.entry_points && typeof ts.entry_points === "object" ? ts.entry_points : null;
+    var tg = ts && ts.targets && typeof ts.targets === "object" ? ts.targets : null;
+    var rr = ts && ts.risk_reward && typeof ts.risk_reward === "object" ? ts.risk_reward : null;
+    var entry = ep ? U.pickNum(ep, ["pullback_entry", "breakout_entry"]) : null;
+    var stop = ts ? U.toNum(ts.stop_loss) : null;
+    var t1 = tg ? U.toNum(tg.target_1) : null;
+    var t2 = tg ? U.toNum(tg.target_2) : null;
+    return {
+      entry: entry !== null ? entry : U.pickNum(plan, ENTRY_KEYS),
+      stop: stop !== null ? stop : U.pickNum(plan, STOP_KEYS),
+      t1: t1 !== null ? t1 : U.pickNum(plan, T1_KEYS),
+      t2: t2 !== null ? t2 : U.pickNum(plan, T2_KEYS),
+      rr1: rr ? U.toNum(rr.to_target_1) : null,
+      rr2: rr ? U.toNum(rr.to_target_2) : null,
+      scenario: null,
+    };
+  }
+
+  function renderPlan(box, detail) {
+    U.clear(box);
+    var plan = planOf(detail);
+    state.plan = plan;
+    if (!plan || typeof plan !== "object") {
+      box.appendChild(el("div", { class: "empty-note", text: "No trade plan returned." }));
+      return;
+    }
+    if (plan.error) { box.appendChild(U.errorBox("Trade plan: " + plan.error)); return; }
+
+    var lv = planLevels(plan);
+    var ts = setupOf(plan);
+    var rr = lv.rr1;
+    if (rr === null && ts && ts.risk_reward && typeof ts.risk_reward === "object") {
+      rr = U.pickNum(ts.risk_reward, ["to_target_1", "to_target_2"]);
+    }
+    if (rr === null) rr = U.pickNum(plan, ["risk_reward", "rr", "risk_reward_ratio", "rr_ratio", "r_r", "reward_risk"]);
+    if (rr === null && lv.entry !== null && lv.stop !== null && lv.t1 !== null && lv.entry !== lv.stop) {
+      rr = (lv.t1 - lv.entry) / (lv.entry - lv.stop);
+    }
+    var quality = U.pick(plan, ["trade_quality", "quality", "grade", "quality_grade", "setup_quality", "plan_quality", "setup_grade"]);
+
+    // A long plan whose entry sits at/below its stop is self-contradictory —
+    // never present it as tradable.
+    var inconsistent = lv.entry !== null && lv.stop !== null && lv.entry <= lv.stop;
+    // The upstream quality grade is computed on target 2, so the reject test
+    // must use the same convention — testing T1 stamped "Reject" on plans the
+    // engine itself grades Good/Strong (T1 is deliberately the nearest level).
+    var rrGrade = lv.rr2 !== null ? lv.rr2 : rr;
+    if (inconsistent) {
+      box.appendChild(U.errorBox("Plan inconsistent: entry " + fmtNum(lv.entry) + " is at/below stop "
+        + fmtNum(lv.stop) + ". Upstream data issue — do not trade these levels."));
+    } else if (rrGrade !== null && rrGrade < 2) {
+      box.appendChild(el("div", { class: "banner-reject",
+        text: "Reject: R:R to T2 " + rrGrade.toFixed(2) + " < 2" }));
+    }
+
+    // EGX-reality checks from the backend: price-band feasibility of the
+    // stop/targets and a liquidity floor on the name itself.
+    var checks = (detail && Array.isArray(detail.plan_checks)) ? detail.plan_checks : [];
+    checks.forEach(function (w) {
+      box.appendChild(el("div", {
+        class: "warn-text",
+        style: { marginTop: "6px", fontSize: "12px" },
+        text: "⚠ " + String(w),
+      }));
+    });
+
+    var levels = el("div", { class: "plan-levels" });
+    [["Entry", lv.entry, "entry"], ["Stop", lv.stop, "stop"], ["Target 1", lv.t1, "target"], ["Target 2", lv.t2, "target"]]
+      .forEach(function (row) {
+        levels.appendChild(el("div", { class: "plan-level " + row[2] }, [
+          el("div", { class: "pl-label", text: row[0] }),
+          el("div", { class: "pl-val", text: row[1] === null ? "—" : fmtNum(row[1]) }),
+        ]));
+      });
+    box.appendChild(levels);
+
+    var meta = el("div", { style: { display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "12px", alignItems: "center" } });
+    if (lv.scenario) {
+      meta.appendChild(el("span", { class: "badge", text: lv.scenario.charAt(0).toUpperCase() + lv.scenario.slice(1) + " plan" }));
+    }
+    if (rr !== null) {
+      meta.appendChild(el("span", { class: "badge " + (rrGrade !== null && rrGrade >= 2 ? "up" : "down"),
+        text: "R:R T1 " + rr.toFixed(2) + (lv.rr2 !== null ? " · T2 " + lv.rr2.toFixed(2) : "") }));
+    }
+    if (quality !== null && quality !== undefined && typeof quality !== "object") {
+      meta.appendChild(el("span", { class: "badge accent", text: "Grade: " + String(quality) }));
+    }
+    var setup = U.pick(plan, ["setup", "strategy", "direction", "side", "bias"]);
+    if (setup && typeof setup === "string") meta.appendChild(el("span", { class: "badge", text: setup }));
+    if (meta.childNodes.length) box.appendChild(meta);
+
+    // Alternative scenario(s) — e.g. the breakout plan when the pullback is primary.
+    var scensAll = ts && ts.scenarios && typeof ts.scenarios === "object" ? ts.scenarios : null;
+    if (scensAll && lv.scenario) {
+      for (var scName in scensAll) {
+        if (scName === lv.scenario) continue;
+        var alt = scenarioLevels(scensAll[scName], scName);
+        if (!alt || alt.entry === null) continue;
+        var altTxt = "Alt — " + scName + ": entry " + fmtNum(alt.entry)
+          + " · stop " + (alt.stop === null ? "—" : fmtNum(alt.stop))
+          + " · T1 " + (alt.t1 === null ? "—" : fmtNum(alt.t1))
+          + (alt.rr1 === null ? "" : " · R:R " + alt.rr1.toFixed(2));
+        box.appendChild(el("div", {
+          class: "muted",
+          style: { marginTop: "8px", fontSize: "12px", fontFamily: "var(--font-mono)" },
+          text: altTxt,
+        }));
+      }
+    }
+
+    var notes = U.pick(plan, ["notes", "reason", "reasons", "rationale", "comment", "analysis"]);
+    if (typeof notes === "string" && notes.trim()) {
+      box.appendChild(el("div", { class: "muted", style: { marginTop: "10px", fontSize: "12.5px", whiteSpace: "pre-wrap" }, text: notes }));
+    } else if (Array.isArray(notes) && notes.length) {
+      var ul = el("ul", { style: { marginTop: "10px", paddingLeft: "18px", fontSize: "12.5px", color: "var(--muted)" } });
+      notes.slice(0, 8).forEach(function (n) { ul.appendChild(el("li", { text: typeof n === "string" ? n : JSON.stringify(n) })); });
+      box.appendChild(ul);
+    }
+
+    // anything else we didn't map — collapsible raw view
+    var det = el("details", { style: { marginTop: "10px" } }, [
+      el("summary", { class: "muted", style: { cursor: "pointer", fontSize: "11.5px" }, text: "Full plan payload" }),
+    ]);
+    det.appendChild(U.renderObject(plan));
+    box.appendChild(det);
+  }
+
+  /* ================= chart + overlays ================= */
+
+  var chartCandles = null;
+
+  function loadChart() {
+    API.get("/api/stocks/" + encodeURIComponent(SYMBOL) + "/history?range=1y&interval=1d").then(function (h) {
+      chartCandles = U.firstArray(h, ["candles", "history", "data"]) || [];
+      applyPlanOverlays();
+      var n = chartCandles.length;
+      if (n) document.getElementById("chart-note").textContent = n + " candles";
+    }).catch(function (e) {
+      var box = document.getElementById("chart");
+      box.innerHTML = "";
+      box.appendChild(U.errorBox("History: " + e.message));
+    });
+  }
+
+  function applyPlanOverlays() {
+    if (!chartCandles) return; // history not in yet; will be called again
+    var overlays = [];
+    var lv = planLevels(state.plan);
+    if (lv.entry !== null) overlays.push({ price: lv.entry, title: "entry", color: "#2FBFA0" });
+    if (lv.stop !== null) overlays.push({ price: lv.stop, title: "stop", color: "#E5534B" });
+    if (lv.t1 !== null) overlays.push({ price: lv.t1, title: "T1", color: "#34C77B" });
+    if (lv.t2 !== null) overlays.push({ price: lv.t2, title: "T2", color: "#34C77B" });
+    fibLevelList(fibOf(state.detail || {})).slice(0, 5).forEach(function (f) {
+      overlays.push({ price: f.price, title: "fib " + f.label, color: "#D2A44C" });
+    });
+    Charts.renderCandles("chart", chartCandles, overlays);
+  }
+
+  /** Extract [{label, price}] from whatever shape the fibonacci payload takes. */
+  function fibLevelList(fib) {
+    var out = [];
+    if (!fib || typeof fib !== "object" || fib.error) return out;
+
+    // Real shape (analyze_egx_fibonacci): retracement_levels / extension_levels
+    // are {ratio: price} dicts. Without this branch the deep fallback landed on
+    // price_position.fib_supports and drew supports only — never resistances.
+    var addDict = function (dict, prefix) {
+      if (!dict || typeof dict !== "object" || Array.isArray(dict)) return false;
+      var added = false;
+      for (var dk in dict) {
+        var dp = U.toNum(dict[dk]);
+        if (dp !== null) { out.push({ label: prefix ? prefix + " " + dk : dk, price: dp }); added = true; }
+      }
+      return added;
+    };
+    var gotRetr = addDict(U.pick(fib, ["retracement_levels"]), "");
+    var gotExt = addDict(U.pick(fib, ["extension_levels"]), "ext");
+    if (gotRetr || gotExt) return out;
+
+    var arr = U.firstArray(fib, ["levels", "fib_levels", "retracements", "fibonacci_levels"]);
+    if (arr) {
+      arr.forEach(function (r) {
+        if (typeof r !== "object" || !r) return;
+        var price = U.pickNum(r, ["price", "value", "level_price"]);
+        var label = U.pick(r, ["level", "ratio", "name", "label"]);
+        if (price !== null) out.push({ label: label === null ? "" : String(label), price: price });
+      });
+      return out;
+    }
+    var lv = U.pick(fib, ["levels", "fib_levels", "retracements"]);
+    if (lv && typeof lv === "object") {
+      for (var k in lv) {
+        var p = U.toNum(lv[k]);
+        if (p !== null) out.push({ label: k, price: p });
+      }
+      return out;
+    }
+    for (var k2 in fib) {
+      if (/^(0?\.\d+|fib|level|retr)/i.test(k2)) {
+        var p2 = U.toNum(fib[k2]);
+        if (p2 !== null) out.push({ label: k2, price: p2 });
+      }
+    }
+    return out;
+  }
+
+  /* ================= MTF grid ================= */
+
+  function loadMtf() {
+    var box = document.getElementById("mtf-box");
+    U.load(box, function () { return API.get("/api/stocks/" + encodeURIComponent(SYMBOL) + "/mtf"); }, function (c, mtf) {
+      var cells = [];
+      var tfPattern = /^(\d+m|\d+h|\d*[dw]|1D|1W|4h|1h|15m|daily|weekly|hourly)$/i;
+
+      var rows = U.firstArray(mtf, ["timeframes", "results", "analyses", "frames"]);
+      if (rows) {
+        rows.forEach(function (r) {
+          if (!r || typeof r !== "object") return;
+          cells.push({ tf: String(U.pick(r, ["timeframe", "tf", "interval", "frame"]) || "?"), data: r });
+        });
+      } else {
+        var holder = U.pick(mtf, ["timeframes", "frames", "analysis", "results"]);
+        var src = (holder && typeof holder === "object" && !Array.isArray(holder)) ? holder : mtf;
+        if (src && typeof src === "object") {
+          for (var k in src) {
+            if (tfPattern.test(k) && src[k] && typeof src[k] === "object") cells.push({ tf: k, data: src[k] });
+          }
+        }
+      }
+
+      if (!cells.length) { c.appendChild(U.renderObject(mtf)); return; }
+
+      var grid = el("div", { class: "mtf-grid" });
+      var failed = [];
+      cells.slice(0, 6).forEach(function (cell) {
+        grid.appendChild(mtfCell(cell, failed));
+      });
+      c.appendChild(grid);
+
+      // A timeframe that failed upstream used to render as a silent "—".
+      if (failed.length) {
+        c.appendChild(el("div", { class: "mtf-note" },
+          "No data for " + failed.join(", ") + " — the upstream feed returned nothing for "
+          + (failed.length > 1 ? "those intervals" : "that interval") + ". Usually a rate limit; retry in a few minutes."));
+      }
+
+      c.appendChild(renderAlignment(U.pick(mtf, ["alignment", "aligned", "consensus", "summary"])));
+    }, { lines: 3, label: "MTF" });
+  }
+
+  /** One timeframe tile. Pushes the timeframe name onto `failed` when it has no usable reading. */
+  function mtfCell(cell, failed) {
+    var d = cell.data || {};
+    var err = U.pick(d, ["error", "message", "detail"]);
+
+    var trend = U.pick(d, ["trend", "direction", "bias", "signal", "recommendation"]);
+    if (trend !== null && typeof trend === "object") trend = U.pick(trend, ["value", "status", "signal", "text"]);
+    var trendTxt = (trend === null || typeof trend === "object") ? "—" : String(trend);
+
+    var momTxt = momentumText(d);
+    if (trendTxt === "—" && momTxt === "—" && failed) failed.push(cell.tf);
+
+    var cls = /up|bull|buy|strong/i.test(trendTxt) ? "up"
+      : /down|bear|sell|weak/i.test(trendTxt) ? "down" : "flat";
+
+    var tile = el("div", { class: "mtf-cell" }, [
+      el("div", { class: "mtf-tf", text: cell.tf }),
+      el("div", { class: "mtf-trend " + cls, text: trendTxt }),
+      el("div", { class: "mtf-mom", text: momTxt }),
+    ]);
+
+    // Tooltip carries the label, the reasons behind the bias, and the advice.
+    var tip = [];
+    var label = U.pick(d, ["label", "name", "title"]);
+    if (typeof label === "string") tip.push(label);
+    var strength = U.pick(d, ["trend_strength", "strength"]);
+    if (typeof strength === "string") tip.push("Trend strength: " + strength);
+    var structure = U.pick(d, ["market_structure", "structure"]);
+    if (typeof structure === "string") tip.push("Structure: " + structure);
+    var reasons = U.pick(d, ["bias_reasons", "reasons"]);
+    if (Array.isArray(reasons)) reasons.forEach(function (r) { if (typeof r === "string") tip.push("• " + r); });
+    var advice = U.pick(d, ["advice", "note"]);
+    if (typeof advice === "string") tip.push(advice);
+    if (typeof err === "string") tip.push("Error: " + err);
+    if (tip.length) tile.title = tip.join("\n");
+
+    return tile;
+  }
+
+  /**
+   * Momentum line. The feed returns RSI as an object
+   * ({value, signal, direction, previous}) which used to stringify to
+   * "[object Object]" — read the number out of it and add the direction arrow.
+   */
+  function momentumText(d) {
+    var mom = U.pick(d, ["momentum", "rsi", "macd", "strength", "rating"]);
+    if (mom === null || mom === undefined) return "—";
+
+    if (typeof mom === "object") {
+      var val = U.pickNum(mom, ["value", "rsi", "current", "reading", "score"]);
+      var dir = U.pick(mom, ["direction", "trend", "slope"]);
+      var sig = U.pick(mom, ["signal", "state", "status"]);
+      var parts = [];
+      if (val !== null) parts.push("RSI " + fmtNum(val, 1));
+      if (typeof dir === "string") parts.push(dir === "Rising" ? "↑" : dir === "Falling" ? "↓" : dir);
+      if (!parts.length && typeof sig === "string") parts.push(sig);
+      if (!parts.length) return "—";
+      return parts.join(" ");
+    }
+
+    if (typeof mom === "number") return "RSI " + fmtNum(mom, 1);
+    var txt = String(mom);
+    return txt.length > 22 ? txt.slice(0, 20) + "…" : txt;
+  }
+
+  /**
+   * Alignment summary. The feed returns an object
+   * ({status, confidence, net_score, divergent_timeframes}); the old code only
+   * rendered plain strings, so this summary never appeared at all.
+   */
+  function renderAlignment(align) {
+    var wrap = el("div", { class: "mtf-align" });
+    if (align === null || align === undefined) return wrap;
+
+    if (typeof align !== "object") {
+      wrap.appendChild(el("span", { class: "badge accent", text: "Alignment: " + String(align) }));
+      return wrap;
+    }
+
+    var status = U.pick(align, ["status", "alignment", "verdict", "state"]);
+    var conf = U.pick(align, ["confidence", "strength"]);
+    var net = U.pickNum(align, ["net_score", "score", "net"]);
+    var diverge = U.pick(align, ["divergent_timeframes", "divergent", "conflicts"]);
+
+    if (typeof status === "string") {
+      var cls = /bull|up|buy/i.test(status) ? "up" : /bear|down|sell/i.test(status) ? "down" : "accent";
+      wrap.appendChild(el("span", { class: "badge " + cls, text: status }));
+    }
+    if (typeof conf === "string") wrap.appendChild(el("span", { class: "badge", text: "Confidence: " + conf }));
+    if (net !== null) wrap.appendChild(el("span", { class: "badge", text: "Net " + (net > 0 ? "+" : "") + fmtNum(net, 0) }));
+    if (Array.isArray(diverge) && diverge.length) {
+      wrap.appendChild(el("span", { class: "badge warn", text: "Diverging: " + diverge.join(", ") }));
+    }
+    if (!wrap.childNodes.length) wrap.appendChild(U.renderObject(align));
+    return wrap;
+  }
+
+  /* ================= tabs ================= */
+
+  function setupTabs() {
+    document.querySelectorAll("#tabs .tab-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        document.querySelectorAll("#tabs .tab-btn").forEach(function (b) { b.classList.remove("active"); });
+        document.querySelectorAll(".tab-pane").forEach(function (p) { p.classList.remove("active"); });
+        btn.classList.add("active");
+        document.getElementById("pane-" + btn.dataset.tab).classList.add("active");
+        loadTab(btn.dataset.tab);
+      });
+    });
+  }
+
+  function loadTab(key) {
+    if (state.tabLoaded[key]) return;
+    state.tabLoaded[key] = true;
+    var api = "/api/stocks/" + encodeURIComponent(SYMBOL);
+    if (key === "smart") {
+      U.load(document.getElementById("pane-smart"),
+        function () { return API.get(api + "/smart-money"); }, renderSmart, { lines: 5, label: "Smart money" });
+    } else if (key === "fib") {
+      renderFibTab();
+    } else if (key === "news") {
+      U.load(document.getElementById("pane-news"),
+        function () { return API.get(api + "/news"); }, renderNews, { lines: 4, label: "News" });
+    } else if (key === "debate") {
+      U.load(document.getElementById("debate-rules"),
+        function () { return API.get(api + "/debate"); }, renderDebate,
+        { pill: "Computing rule-based signal summary…", label: "Signal summary" });
+      loadDebateBrief();
+    } else if (key === "thesis") {
+      loadThesis();
+    }
+  }
+
+  function renderSmart(c, sm) {
+    var verdict = U.pick(sm, ["verdict", "signal", "conclusion", "smart_money_signal", "summary"]);
+    if (verdict !== null && verdict !== undefined && typeof verdict !== "object") {
+      var cls = /accum|buy|bull|inflow/i.test(String(verdict)) ? "up" : /distrib|sell|bear|outflow/i.test(String(verdict)) ? "down" : "neutral";
+      c.appendChild(el("div", { style: { marginBottom: "10px" } }, el("span", { class: "badge " + cls, text: String(verdict) })));
+    }
+    c.appendChild(U.renderObject(sm));
+  }
+
+  function renderFibTab() {
+    var pane = document.getElementById("pane-fib");
+    U.clear(pane);
+    var fib = fibOf(state.detail || {});
+    if (!state.detail) { pane.appendChild(U.loadingPill("Waiting for analysis…")); state.tabLoaded.fib = false; return; }
+    if (!fib) { pane.appendChild(el("div", { class: "empty-note", text: "No fibonacci data in the analysis payload." })); return; }
+    if (fib.error) { pane.appendChild(U.errorBox("Fibonacci: " + fib.error)); return; }
+    var levels = fibLevelList(fib);
+    if (levels.length) {
+      var tbody = el("tbody");
+      levels.forEach(function (l) {
+        tbody.appendChild(el("tr", {}, [
+          el("td", { class: "num", text: l.label || "—" }),
+          el("td", { class: "num", text: fmtNum(l.price) }),
+        ]));
+      });
+      pane.appendChild(el("div", { class: "tbl-wrap", style: { maxWidth: "360px" } }, el("table", { class: "tbl" }, [
+        el("thead", {}, el("tr", {}, [el("th", { text: "Level" }), el("th", { class: "num", text: "Price" })])),
+        tbody,
+      ])));
+    }
+    var det = el("details", { style: { marginTop: "10px" }, open: levels.length ? null : "open" }, [
+      el("summary", { class: "muted", style: { cursor: "pointer", fontSize: "11.5px" }, text: "Full fibonacci payload" }),
+    ]);
+    det.appendChild(U.renderObject(fib));
+    pane.appendChild(det);
+  }
+
+  function renderNews(c, news) {
+    var items = U.firstArray(news, ["news", "articles", "items", "results", "data"]);
+    var sentiment = U.pick(news, ["sentiment", "overall_sentiment", "sentiment_score"]);
+    if (sentiment !== null && sentiment !== undefined && typeof sentiment !== "object") {
+      c.appendChild(el("div", { style: { marginBottom: "8px" } }, el("span", { class: "badge accent", text: "Sentiment: " + String(sentiment) })));
+    }
+    if (!items || !items.length) {
+      var summary = U.pick(news, ["summary", "text", "content"]);
+      if (typeof summary === "string" && summary.trim()) c.appendChild(el("div", { class: "brief-text", text: summary }));
+      else c.appendChild(U.renderObject(news));
+      return;
+    }
+    items.slice(0, 12).forEach(function (a) {
+      var title = U.pick(a, ["title", "headline", "name"]) || "(untitled)";
+      var url = U.pick(a, ["url", "link", "href"]);
+      var when = U.pick(a, ["published_at", "date", "published", "time"]);
+      var src = U.pick(a, ["source", "provider", "site"]);
+      var item = el("div", { class: "news-item" });
+      // Marketaux supplies this URL — only http(s) may reach an href, or a
+      // "javascript:" link would execute when clicked.
+      var href = U.safeUrl(url);
+      item.appendChild(href
+        ? el("a", { class: "news-title", href: href, target: "_blank", rel: "noopener noreferrer", text: String(title) })
+        : el("div", { class: "news-title", text: String(title) }));
+      var meta = [];
+      if (src) meta.push(typeof src === "object" ? U.pick(src, ["name"]) || "" : String(src));
+      if (when) meta.push(String(when).slice(0, 16).replace("T", " "));
+      if (meta.length) item.appendChild(el("div", { class: "news-meta", text: meta.filter(Boolean).join(" · ") }));
+      c.appendChild(item);
+    });
+  }
+
+  function renderDebate(c, deb) {
+    // Deterministic rule checklist — label it as exactly that, never as AI.
+    c.appendChild(el("div", { style: { fontWeight: "600", fontSize: "12.5px", marginBottom: "4px" },
+      text: "Rule-based signal summary (deterministic checklist — not AI)" }));
+    var note = U.pick(deb, ["method_note"]);
+    if (typeof note === "string") {
+      c.appendChild(el("div", { class: "muted", style: { fontSize: "11.5px", marginBottom: "10px" }, text: note }));
+    }
+    var consensus = U.pick(deb, ["consensus"]);
+    var verdict = (consensus && typeof consensus === "object")
+      ? U.pick(consensus, ["decision"])
+      : U.pick(deb, ["verdict", "final_verdict", "conclusion", "decision", "recommendation"]);
+    if (verdict !== null && verdict !== undefined && typeof verdict !== "object") {
+      var cls = /buy|bull/i.test(String(verdict)) ? "up" : /sell|bear/i.test(String(verdict)) ? "down" : "neutral";
+      var row = el("div", { style: { marginBottom: "10px", display: "flex", gap: "8px", flexWrap: "wrap" } });
+      row.appendChild(el("span", { class: "badge " + cls, text: String(verdict) }));
+      var conf = consensus && typeof consensus === "object" ? U.pick(consensus, ["confidence"]) : null;
+      if (typeof conf === "string") row.appendChild(el("span", { class: "badge", text: conf }));
+      c.appendChild(row);
+    }
+    var agentsObj = U.pick(deb, ["agents_debate"]);
+    var agents = U.firstArray(deb, ["agents", "analyses", "opinions", "debate", "perspectives"]);
+    if (!agents && agentsObj && typeof agentsObj === "object") {
+      agents = [];
+      for (var ak in agentsObj) { if (agentsObj[ak] && typeof agentsObj[ak] === "object") agents.push(agentsObj[ak]); }
+    }
+    if (agents && agents.length && typeof agents[0] === "object") {
+      agents.forEach(function (a) {
+        var name = U.pick(a, ["agent", "name", "role", "persona"]) || "rule set";
+        var op = U.pick(a, ["opinion", "analysis", "argument", "view", "text", "content", "summary"]);
+        c.appendChild(el("div", { style: { marginBottom: "12px" } }, [
+          el("div", { style: { fontWeight: "600", fontSize: "12.5px", marginBottom: "3px" }, text: String(name) }),
+          typeof op === "string"
+            ? el("div", { class: "muted", style: { fontSize: "12.5px", whiteSpace: "pre-wrap" }, text: op })
+            : U.renderObject(op || a),
+        ]));
+      });
+      return;
+    }
+    c.appendChild(U.renderObject(deb));
+  }
+
+  /* ---------- LLM bull/bear debate (genuinely adversarial, via briefs) ---------- */
+
+  function loadDebateBrief() {
+    var box = document.getElementById("debate-llm");
+    API.get("/api/brief/latest?kind=debate&symbol=" + encodeURIComponent(SYMBOL)).then(function (b) {
+      renderDebateBrief(box, b);
+    }).catch(function () { /* none yet — button generates one */ });
+  }
+
+  function renderDebateBrief(box, b) {
+    U.clear(box);
+    var content = U.pick(b, ["content", "text", "body"]);
+    if (typeof content !== "string" || !content.trim()) { box.appendChild(U.renderObject(b)); return; }
+    var date = U.pick(b, ["date", "created_at"]);
+    box.appendChild(el("div", { style: { fontWeight: "600", fontSize: "12.5px", marginBottom: "4px" },
+      text: "AI bull/bear debate" + (typeof date === "string" ? " · " + date : "") }));
+    box.appendChild(el("div", { class: "brief-text", text: content }));
+  }
+
+  function generateDebate() {
+    var btn = document.getElementById("btn-debate");
+    var box = document.getElementById("debate-llm");
+    btn.disabled = true;
+    U.clear(box).appendChild(U.loadingPill("Running AI debate… (LLM call, may take ~1 min)"));
+    API.post("/api/brief/debate/" + encodeURIComponent(SYMBOL)).then(function (b) {
+      renderDebateBrief(box, b);
+      toast("Debate generated.", "success");
+    }).catch(function (e) {
+      U.clear(box).appendChild(U.errorBox("Debate failed: " + e.message));
+      toast("Debate failed: " + e.message, "error");
+    }).finally(function () { btn.disabled = false; });
+  }
+
+  /* ---------- thesis tab ---------- */
+
+  function loadThesis() {
+    var box = document.getElementById("thesis-box");
+    U.clear(box).appendChild(U.skeleton(3));
+    API.get("/api/brief/latest?kind=thesis&symbol=" + encodeURIComponent(SYMBOL)).then(function (b) {
+      renderThesis(box, b);
+    }).catch(function (e) {
+      U.clear(box).appendChild(el("div", { class: "empty-note", text: "No thesis yet (" + e.message + "). Use Generate." }));
+    });
+  }
+
+  function renderThesis(box, b) {
+    U.clear(box);
+    var content = U.pick(b, ["content", "text", "thesis", "body"]);
+    if (typeof content !== "string" || !content.trim()) { box.appendChild(U.renderObject(b)); return; }
+    var date = U.pick(b, ["date", "created_at"]);
+    if (typeof date === "string") box.appendChild(el("div", { class: "muted", style: { fontSize: "11px", marginBottom: "8px" }, text: date }));
+    box.appendChild(el("div", { class: "brief-text", text: content }));
+  }
+
+  function generateThesis() {
+    var btn = document.getElementById("btn-thesis");
+    var box = document.getElementById("thesis-box");
+    btn.disabled = true;
+    U.clear(box).appendChild(U.loadingPill("Generating thesis… (LLM call, may take ~1 min)"));
+    API.post("/api/brief/thesis/" + encodeURIComponent(SYMBOL)).then(function (b) {
+      renderThesis(box, b);
+      toast("Thesis generated.", "success");
+    }).catch(function (e) {
+      U.clear(box).appendChild(U.errorBox("Thesis failed: " + e.message));
+      toast("Thesis failed: " + e.message, "error");
+    }).finally(function () { btn.disabled = false; });
+  }
+
+  /* ================= watchlist star ================= */
+
+  function loadWatchlistState() {
+    API.get("/api/watchlist").then(function (data) {
+      var rows = Array.isArray(data) ? data : U.firstArray(data, ["watchlist", "items"]) || [];
+      state.inWatchlist = rows.some(function (r) {
+        return (typeof r === "string" ? r.toUpperCase() : U.symbolOf(r)) === SYMBOL;
+      });
+      paintStar();
+    }).catch(function () { /* leave star off */ });
+  }
+
+  function paintStar() {
+    var btn = document.getElementById("star-btn");
+    btn.textContent = state.inWatchlist ? "★" : "☆";
+    btn.className = "star-btn" + (state.inWatchlist ? " on" : "");
+    btn.title = state.inWatchlist ? "Remove from watchlist" : "Add to watchlist";
+  }
+
+  function toggleWatchlist() {
+    var btn = document.getElementById("star-btn");
+    btn.disabled = true;
+    var done = function (added) {
+      state.inWatchlist = added;
+      paintStar();
+      btn.disabled = false;
+      toast(added ? SYMBOL + " added to watchlist." : SYMBOL + " removed from watchlist.", "success");
+      renderSidebar("");
+    };
+    var failed = function (e) {
+      btn.disabled = false;
+      toast("Watchlist: " + e.message, "error");
+    };
+    if (state.inWatchlist) {
+      API.del("/api/watchlist/" + encodeURIComponent(SYMBOL)).then(function () { done(false); }).catch(failed);
+    } else {
+      API.post("/api/watchlist", { symbol: SYMBOL }).then(function () { done(true); }).catch(function () {
+        // alternate route shape: POST /api/watchlist/{symbol}
+        API.post("/api/watchlist/" + encodeURIComponent(SYMBOL)).then(function () { done(true); }).catch(failed);
+      });
+    }
+  }
+
+  /* ================= position sizer ================= */
+
+  function prefillSizer() {
+    var lv = planLevels(state.plan);
+    if (lv.entry !== null && !document.getElementById("ps-entry").value) document.getElementById("ps-entry").value = lv.entry;
+    if (lv.stop !== null && !document.getElementById("ps-stop").value) document.getElementById("ps-stop").value = lv.stop;
+  }
+
+  function sizePosition() {
+    var box = document.getElementById("ps-result");
+    var account = parseFloat(document.getElementById("ps-account").value);
+    var risk = parseFloat(document.getElementById("ps-risk").value);
+    var entry = parseFloat(document.getElementById("ps-entry").value);
+    var stop = parseFloat(document.getElementById("ps-stop").value);
+    if (!isFinite(account) || !isFinite(risk) || !isFinite(entry) || !isFinite(stop)) {
+      U.clear(box).appendChild(U.errorBox("Fill account, risk %, entry and stop first."));
+      return;
+    }
+    var btn = document.getElementById("ps-btn");
+    btn.disabled = true;
+    U.clear(box).appendChild(U.loadingPill("Sizing…"));
+    API.post("/api/portfolio/size", { account: account, risk_pct: risk, entry: entry, stop: stop, symbol: SYMBOL }).then(function (r) {
+      U.clear(box);
+      var shares = U.pickNum(r, ["shares", "qty", "quantity", "position_size"]);
+      var riskAmt = U.pickNum(r, ["risk_amount", "riskAmount", "risk"]);
+      var cost = U.pickNum(r, ["position_cost", "cost", "notional", "position_value"]);
+      var dl = el("dl", { class: "kv" });
+      dl.appendChild(el("dt", { text: "Shares" })); dl.appendChild(el("dd", { text: shares === null ? "—" : fmtNum(shares, 0) }));
+      dl.appendChild(el("dt", { text: "Risk amount" })); dl.appendChild(el("dd", { text: riskAmt === null ? "—" : fmtNum(riskAmt) + " EGP" }));
+      dl.appendChild(el("dt", { text: "Position cost" })); dl.appendChild(el("dd", { text: cost === null ? "—" : fmtNum(cost) + " EGP" }));
+      box.appendChild(dl);
+      var note = U.pick(r, ["risk_reward_note", "note", "warning", "message"]);
+      if (note !== null && note !== undefined && typeof note !== "object") {
+        box.appendChild(el("div", { class: "warn-text", style: { marginTop: "6px", fontSize: "12px" }, text: String(note) }));
+      }
+    }).catch(function (e) {
+      U.clear(box).appendChild(U.errorBox("Sizing failed: " + e.message));
+    }).finally(function () { btn.disabled = false; });
+  }
+})();
+</script>
+</body>
+</html>

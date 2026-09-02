@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Portfolio — EGX Decision Engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+<link rel="stylesheet" href="/assets/pg.css">
+</head>
+<body>
+<div class="pg-layout">
+  <aside id="sidebar"></aside>
+  <div class="pg-main">
+    <header id="topbar"></header>
+    <main class="pg-content">
+      <section class="pg-panel">
+        <h2>Performance</h2>
+        <div id="perfBox"></div>
+      </section>
+
+      <section class="pg-panel">
+        <h2>Open positions</h2>
+        <div id="openBox"></div>
+      </section>
+
+      <section class="pg-panel">
+        <h2>New position</h2>
+        <form class="pg-form" id="posForm">
+          <label class="pg-field">Symbol
+            <input id="pSymbol" type="text" placeholder="COMI" autocomplete="off" required>
+          </label>
+          <label class="pg-field">Qty (shares)
+            <input id="pQty" type="number" step="any" min="0" required>
+          </label>
+          <label class="pg-field">Entry
+            <input id="pEntry" type="number" step="any" min="0" required>
+          </label>
+          <label class="pg-field">Stop
+            <input id="pStop" type="number" step="any" min="0" required>
+          </label>
+          <label class="pg-field">Target 1
+            <input id="pT1" type="number" step="any" min="0">
+          </label>
+          <label class="pg-field">Target 2
+            <input id="pT2" type="number" step="any" min="0">
+          </label>
+          <label class="pg-field">Note
+            <input id="pNote" type="text" required placeholder="why? setup · scanner · planned R:R">
+          </label>
+          <button type="submit" class="pg-btn" id="posBtn">Open position</button>
+        </form>
+        <div id="posFormMsg" class="pg-muted" style="font-size:12px;margin-top:8px"></div>
+      </section>
+
+      <section class="pg-panel">
+        <h2>Closed positions</h2>
+        <div id="closedBox"></div>
+      </section>
+
+      <section class="pg-panel">
+        <h2>Alert rules</h2>
+        <form class="pg-form" id="ruleForm" style="margin-bottom:14px">
+          <label class="pg-field">Name
+            <input id="rName" type="text" placeholder="optional">
+          </label>
+          <label class="pg-field">Rule type
+            <select id="rType"></select>
+          </label>
+          <span id="ruleParams" style="display:contents"></span>
+          <button type="submit" class="pg-btn" id="ruleBtn">Create rule</button>
+          <button type="button" class="pg-btn secondary" id="evalBtn">Evaluate now</button>
+        </form>
+        <div id="rulesBox"></div>
+      </section>
+
+      <section class="pg-panel">
+        <h2>Fired alerts</h2>
+        <div id="firedBox"></div>
+      </section>
+    </main>
+    <footer class="pg-footer">Analysis tooling — not financial advice. Data delayed ~15 min.</footer>
+  </div>
+</div>
+
+<script src="/assets/api.js"></script>
+<script src="/assets/ui.js"></script>
+<script src="/assets/pg.js"></script>
+<script>
+'use strict';
+/* Portfolio + alerts page logic */
+(function () {
+  var PG = window.PG;
+  function $(id) { return document.getElementById(id); }
+
+  var lastPerf = null;
+
+  /* ---------- performance ---------- */
+
+  async function loadPerformance() {
+    var box = $('perfBox');
+    PG.loading(box, 'Loading performance…');
+    try {
+      var p = await PG.api('get', '/api/portfolio/performance');
+      lastPerf = p;
+      box.innerHTML = '';
+      var cards = PG.mk('div', { class: 'pg-cards' });
+      var realized = PG.findVal(p, ['realized_pnl', 'realized', 'total_realized_pnl']);
+      var unreal = PG.findVal(p, ['unrealized_pnl', 'open_pnl', 'mtm_pnl']);
+      var win = PG.findVal(p, ['win_rate', 'win_rate_pct']);
+      var avgR = PG.findVal(p, ['avg_r', 'avg_r_multiple', 'average_r']);
+      var openRisk = PG.findVal(p, ['open_risk', 'total_open_risk', 'risk_at_stops']);
+      var winNode;
+      if (win === undefined || win === null || !isFinite(Number(win))) winNode = '—';
+      else {
+        // Backend contract: win_rate is already a percent (0-100). The old
+        // "multiply values <= 1 by 100" guess rendered a real 1.0% as 100%.
+        winNode = PG.num(Number(win), 1) + '%';
+      }
+      var fees = PG.findVal(p, ['fees_paid', 'total_fees']);
+      cards.appendChild(PG.metricCard('Realized PnL (net)', PG.signedNode(realized, ' EGP')));
+      cards.appendChild(PG.metricCard('Unrealized PnL (net)', PG.signedNode(unreal, ' EGP')));
+      cards.appendChild(PG.metricCard('Win rate (net)', winNode));
+      cards.appendChild(PG.metricCard('Avg R (net)', avgR === undefined ? '—' : PG.num(avgR)));
+      cards.appendChild(PG.metricCard('Fees paid', fees === undefined || fees === null ? '—' : PG.num(fees) + ' EGP'));
+      var heatPct = PG.findVal(p, ['open_heat_pct']);
+      cards.appendChild(PG.metricCard('Open risk',
+        (openRisk === undefined ? '—' : PG.num(openRisk) + ' EGP')
+        + (heatPct !== undefined && heatPct !== null ? ' (' + PG.num(heatPct, 1) + '% heat)' : '')));
+      var rFollowed = PG.findVal(p, ['avg_r_plan_followed']);
+      var rDeviated = PG.findVal(p, ['avg_r_plan_deviated']);
+      if (rFollowed !== undefined && rFollowed !== null) {
+        cards.appendChild(PG.metricCard('Avg R · plan followed', PG.num(rFollowed) + 'R'));
+      }
+      if (rDeviated !== undefined && rDeviated !== null) {
+        cards.appendChild(PG.metricCard('Avg R · deviated', PG.num(rDeviated) + 'R'));
+      }
+      box.appendChild(cards);
+      var basis = PG.findVal(p, ['pnl_basis']);
+      if (typeof basis === 'string') {
+        var basisNote = PG.mk('div', { class: 'pg-muted', style: 'font-size:11.5px;margin-top:6px' }, [basis]);
+        box.appendChild(basisNote);
+      }
+      box.appendChild(PG.detailsBlock('Full performance payload', p));
+    } catch (e) {
+      lastPerf = null;
+      PG.errBox(box, 'Performance failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  /* ---------- positions ---------- */
+
+  function findMarks(perf) {
+    var out = {};
+    (function walk(x, depth) {
+      if (!x || depth > 3 || typeof x !== 'object') return;
+      if (Array.isArray(x)) {
+        x.forEach(function (it) {
+          if (it && typeof it === 'object' && it.symbol &&
+              (it.last !== undefined || it.pnl !== undefined || it.market_price !== undefined ||
+               it.unrealized_pnl !== undefined || it.price !== undefined)) {
+            var extra = {};
+            ['last', 'price', 'market_price', 'mark_price', 'mark_source', 'mark_as_of',
+             'pnl', 'pnl_pct', 'unrealized_pnl', 'r_multiple'].forEach(function (k) {
+              if (it[k] !== undefined && it[k] !== null) extra[k] = it[k];
+            });
+            if (Object.keys(extra).length) out[it.id !== undefined ? 'id:' + it.id : 'sym:' + it.symbol] = extra;
+          }
+        });
+        return;
+      }
+      Object.keys(x).forEach(function (k) { walk(x[k], depth + 1); });
+    })(perf, 0);
+    return out;
+  }
+
+  async function loadPositions() {
+    var openBox = $('openBox'), closedBox = $('closedBox');
+    PG.loading(openBox); PG.loading(closedBox);
+    try {
+      var raw = await PG.api('get', '/api/portfolio/positions?status=all');
+      var list = Array.isArray(raw) ? raw : PG.extractRows(raw);
+      list = list.filter(function (r) { return r && typeof r === 'object'; });
+      var marks = findMarks(lastPerf);
+      var open = [], closed = [];
+      list.forEach(function (r) {
+        var st = String(r.status || '').toLowerCase();
+        var isOpen = st ? st === 'open' : !r.closed_at;
+        if (isOpen) {
+          var m = marks['id:' + r.id] || marks['sym:' + r.symbol];
+          open.push(m ? Object.assign({}, r, m) : r);
+        } else closed.push(r);
+      });
+
+      openBox.innerHTML = '';
+      openBox.appendChild(PG.table(open, {
+        exclude: ['plan_json', 'closed_at', 'exit_price', 'status'],
+        onRow: PG.openStock,
+        renderers: {
+          pnl: function (v) { return PG.signedNode(v, ''); },
+          unrealized_pnl: function (v) { return PG.signedNode(v, ''); },
+          pnl_pct: function (v) { return PG.pctNode(v); }
+        },
+        trailing: [{
+          label: '',
+          render: function (row) {
+            var b = PG.mk('button', { type: 'button', class: 'pg-btn danger small' }, ['Close']);
+            b.addEventListener('click', function () { closePosition(row); });
+            return b;
+          }
+        }]
+      }));
+
+      closedBox.innerHTML = '';
+      closedBox.appendChild(PG.table(closed, {
+        exclude: ['plan_json', 'status'],
+        onRow: PG.openStock,
+        renderers: {
+          pnl: function (v) { return PG.signedNode(v, ''); },
+          pnl_pct: function (v) { return PG.pctNode(v); },
+          r_multiple: function (v) { return PG.signedNode(v, 'R'); }
+        }
+      }));
+    } catch (e) {
+      PG.errBox(openBox, 'Positions failed: ' + (e && e.message ? e.message : e));
+      PG.errBox(closedBox, 'Positions failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function closePosition(row) {
+    // Journaling loop: re-surface the entry note ("why I took this") at the
+    // moment of exit, then record whether the plan was followed.
+    var why = row.note ? '\n\nYour entry note:\n"' + String(row.note) + '"' : '';
+    var hint = row.last !== undefined ? row.last : (row.price !== undefined ? row.price : row.entry);
+    var s = window.prompt('Exit price for ' + (row.symbol || 'position') + ' (#' + row.id + '):' + why,
+      hint === undefined ? '' : String(hint));
+    if (s === null) return;
+    var x = Number(s);
+    if (!isFinite(x) || x <= 0) { PG.notify('Invalid exit price', 'error'); return; }
+    var followed = window.confirm('Did you follow the plan on this trade?\n\nOK = followed the plan · Cancel = deviated');
+    try {
+      var res = await PG.api('post', '/api/portfolio/positions/' + encodeURIComponent(row.id) + '/close',
+        { exit_price: x, plan_followed: followed });
+      var pnl = res && typeof res === 'object' ? PG.findVal(res, ['pnl']) : undefined;
+      var rMult = res && typeof res === 'object' ? PG.findVal(res, ['r_multiple']) : undefined;
+      PG.notify('Position closed' + (pnl !== undefined ? ' — net PnL ' + PG.num(pnl) + ' EGP' : '')
+        + (rMult !== undefined && rMult !== null ? ' (' + PG.num(rMult) + 'R)' : '')
+        + (followed ? '' : ' — recorded as plan deviation'), 'success');
+      refreshPortfolio();
+    } catch (e) {
+      PG.notify('Close failed: ' + (e && e.message ? e.message : e), 'error');
+    }
+  }
+
+  async function submitPosition(ev) {
+    ev.preventDefault();
+    var symbol = String($('pSymbol').value || '').replace(/^EGX:/i, '').trim().toUpperCase();
+    var qty = Number($('pQty').value), entry = Number($('pEntry').value), stop = Number($('pStop').value);
+    var t1 = $('pT1').value === '' ? null : Number($('pT1').value);
+    var t2 = $('pT2').value === '' ? null : Number($('pT2').value);
+    var note = String($('pNote').value || '');
+    if (!note.trim()) {
+      PG.notify('A "why" note is required — record the setup, the scanner that flagged it, and the planned R:R. You will re-read it when you close.', 'error');
+      $('pNote').focus();
+      return;
+    }
+    if (!symbol) { PG.notify('Symbol is required', 'error'); return; }
+    if (!isFinite(qty) || qty <= 0) { PG.notify('Qty must be a positive number', 'error'); return; }
+    if (!isFinite(entry) || entry <= 0) { PG.notify('Entry must be a positive price', 'error'); return; }
+    if (!isFinite(stop) || stop <= 0) { PG.notify('Stop must be a positive price', 'error'); return; }
+    if (stop >= entry) { PG.notify('Stop must be below entry for a long position', 'error'); return; }
+    if (t1 !== null && (!isFinite(t1) || t1 <= 0)) { PG.notify('Target 1 must be a positive price', 'error'); return; }
+    if (t2 !== null && (!isFinite(t2) || t2 <= 0)) { PG.notify('Target 2 must be a positive price', 'error'); return; }
+    var btn = $('posBtn');
+    btn.disabled = true;
+    var body = { symbol: symbol, qty: qty, entry: entry, stop: stop, target1: t1, target2: t2, note: note };
+    try {
+      var res;
+      try {
+        res = await PG.api('post', '/api/portfolio/positions', body);
+      } catch (err) {
+        // Open-heat cap: the backend blocks and asks for an explicit override.
+        var msg = err && err.message ? String(err.message) : '';
+        if (msg.indexOf('BLOCKED') === 0 || msg.indexOf('open-heat') !== -1) {
+          if (!window.confirm(msg + '\n\nOverride the cap and open it anyway?')) {
+            PG.notify('Position not opened (open-heat cap).', 'info');
+            return;
+          }
+          body.allow_override = true;
+          res = await PG.api('post', '/api/portfolio/positions', body);
+        } else {
+          throw err;
+        }
+      }
+      PG.notify('Opened ' + PG.num(qty, 0) + ' × ' + symbol + ' @ ' + PG.num(entry), 'success');
+      var warns = res && typeof res === 'object' ? res.risk_warnings : null;
+      if (Array.isArray(warns)) {
+        warns.forEach(function (w) { PG.notify('⚠ ' + w, 'error'); });
+      }
+      $('posForm').reset();
+      refreshPortfolio();
+    } catch (e) {
+      PG.notify('Open position failed: ' + (e && e.message ? e.message : e), 'error');
+    } finally { btn.disabled = false; }
+  }
+
+  /* ---------- alert rules ---------- */
+
+  var RULE_TYPES = {
+    price_above:   { symbol: { kind: 'text', placeholder: 'COMI' }, level: { kind: 'number' } },
+    price_below:   { symbol: { kind: 'text', placeholder: 'COMI' }, level: { kind: 'number' } },
+    score_min:     { universe: { kind: 'text', placeholder: 'EGX30 (or blank)' }, symbol: { kind: 'text', placeholder: 'or one symbol' }, threshold: { kind: 'number', value: 70 } },
+    squeeze:       { universe: { kind: 'text', value: 'EGX30' }, bbw_max: { kind: 'number', value: 0.04 } },
+    signal_change: { symbol: { kind: 'text', placeholder: 'COMI' } },
+    entry_hit:     { symbol: { kind: 'text', placeholder: 'COMI' }, entry: { kind: 'number' } }
+  };
+
+  function buildRuleTypePicker() {
+    var sel = $('rType');
+    sel.innerHTML = '';
+    Object.keys(RULE_TYPES).forEach(function (t) {
+      sel.appendChild(PG.mk('option', { value: t }, [t.replace(/_/g, ' ')]));
+    });
+    sel.addEventListener('change', function () { buildRuleParamForm(sel.value); });
+    buildRuleParamForm(sel.value);
+  }
+
+  function buildRuleParamForm(type) {
+    var box = $('ruleParams');
+    box.innerHTML = '';
+    var spec = RULE_TYPES[type] || {};
+    Object.keys(spec).forEach(function (name) {
+      var cfg = spec[name];
+      var input = PG.mk('input', {
+        type: cfg.kind === 'number' ? 'number' : 'text',
+        step: 'any',
+        placeholder: cfg.placeholder || ''
+      });
+      if (cfg.value !== undefined) input.value = String(cfg.value);
+      input.setAttribute('data-param', name);
+      input.setAttribute('data-kind', cfg.kind);
+      var label = PG.mk('label', { class: 'pg-field' }, [name.replace(/_/g, ' ')]);
+      label.appendChild(input);
+      box.appendChild(label);
+    });
+  }
+
+  function ruleParamsFromForm() {
+    var params = {};
+    var inputs = $('ruleParams').querySelectorAll('[data-param]');
+    for (var i = 0; i < inputs.length; i++) {
+      var inp = inputs[i];
+      var v = String(inp.value).trim();
+      if (v === '') continue;
+      var name = inp.getAttribute('data-param');
+      if (inp.getAttribute('data-kind') === 'number') params[name] = Number(v);
+      else if (name === 'symbol') params[name] = v.replace(/^EGX:/i, '').trim().toUpperCase();
+      else params[name] = v;
+    }
+    return params;
+  }
+
+  function validateRule(type, params) {
+    if (type === 'price_above' || type === 'price_below') {
+      if (!params.symbol) return 'symbol is required';
+      if (!isFinite(params.level)) return 'level must be a number';
+    }
+    if (type === 'score_min') {
+      if (!params.universe && !params.symbol) return 'provide a universe or a symbol';
+      if (!isFinite(params.threshold)) return 'threshold must be a number';
+    }
+    if (type === 'squeeze') {
+      if (!params.universe) return 'universe is required';
+      if (!isFinite(params.bbw_max)) return 'bbw max must be a number';
+    }
+    if (type === 'signal_change' && !params.symbol) return 'symbol is required';
+    if (type === 'entry_hit') {
+      if (!params.symbol) return 'symbol is required';
+      if (!isFinite(params.entry)) return 'entry must be a number';
+    }
+    return null;
+  }
+
+  async function submitRule(ev) {
+    ev.preventDefault();
+    var type = $('rType').value;
+    var params = ruleParamsFromForm();
+    var problem = validateRule(type, params);
+    if (problem) { PG.notify('Rule invalid: ' + problem, 'error'); return; }
+    var name = String($('rName').value || '').trim() || (type + (params.symbol ? ' ' + params.symbol : params.universe ? ' ' + params.universe : ''));
+    var btn = $('ruleBtn');
+    btn.disabled = true;
+    try {
+      await PG.api('post', '/api/alerts/rules', { name: name, rule_type: type, params: params });
+      PG.notify('Alert rule created: ' + name, 'success');
+      $('rName').value = '';
+      loadRules();
+    } catch (e) {
+      PG.notify('Create rule failed: ' + (e && e.message ? e.message : e), 'error');
+    } finally { btn.disabled = false; }
+  }
+
+  async function loadRules() {
+    var box = $('rulesBox');
+    PG.loading(box, 'Loading rules…');
+    try {
+      var raw = await PG.api('get', '/api/alerts/rules');
+      var rules = Array.isArray(raw) ? raw : PG.extractRows(raw);
+      rules = rules.filter(function (r) { return r && typeof r === 'object'; });
+      box.innerHTML = '';
+      box.appendChild(PG.table(rules, {
+        columns: [
+          { key: 'id', label: 'ID' },
+          { key: 'name', label: 'Name' },
+          { key: 'rule_type', label: 'Type' },
+          { key: 'params_json', label: 'Params', render: function (r) {
+              var p = r.params_json !== undefined ? r.params_json : r.params;
+              if (typeof p === 'string') { try { p = JSON.parse(p); } catch (e) {} }
+              var txt = '—';
+              if (p !== null && p !== undefined) { try { txt = typeof p === 'object' ? JSON.stringify(p) : String(p); } catch (e2) { txt = String(p); } }
+              var s = PG.mk('span', { class: 'pg-num', style: 'font-size:12px' }, [txt.length > 80 ? txt.slice(0, 77) + '…' : txt]);
+              s.title = txt;
+              return s;
+            } },
+          { key: 'enabled', label: 'Enabled', render: function (r) {
+              var on = r.enabled === 1 || r.enabled === true;
+              return PG.mk('span', { class: 'pg-badge' + (on ? '' : ' off') }, [on ? 'on' : 'off']);
+            } },
+          { key: 'created_at', label: 'Created' }
+        ],
+        trailing: [{
+          label: '',
+          render: function (r) {
+            var wrap = PG.mk('span');
+            var on = r.enabled === 1 || r.enabled === true;
+            var tg = PG.mk('button', { type: 'button', class: 'pg-btn secondary small', style: 'margin-right:6px' }, [on ? 'Disable' : 'Enable']);
+            tg.addEventListener('click', function () { toggleRule(r); });
+            var del = PG.mk('button', { type: 'button', class: 'pg-btn danger small' }, ['Delete']);
+            del.addEventListener('click', function () { deleteRule(r); });
+            wrap.appendChild(tg);
+            wrap.appendChild(del);
+            return wrap;
+          }
+        }]
+      }));
+    } catch (e) {
+      PG.errBox(box, 'Rules failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function toggleRule(r) {
+    var next = (r.enabled === 1 || r.enabled === true) ? 0 : 1;
+    try {
+      await PG.api('post', '/api/alerts/rules/' + encodeURIComponent(r.id) + '/toggle', { enabled: next });
+      PG.notify('Rule "' + (r.name || r.id) + '" ' + (next ? 'enabled' : 'disabled'), 'success');
+      loadRules();
+    } catch (e) {
+      PG.notify('Toggle failed: ' + (e && e.message ? e.message : e), 'error');
+    }
+  }
+
+  async function deleteRule(r) {
+    if (!window.confirm('Delete alert rule "' + (r.name || r.id) + '"?')) return;
+    try {
+      await PG.api('del', '/api/alerts/rules/' + encodeURIComponent(r.id));
+      PG.notify('Rule deleted', 'success');
+      loadRules();
+      loadFired();
+    } catch (e) {
+      PG.notify('Delete failed: ' + (e && e.message ? e.message : e), 'error');
+    }
+  }
+
+  async function evaluateNow() {
+    var btn = $('evalBtn');
+    btn.disabled = true;
+    try {
+      var res = await PG.api('post', '/api/alerts/evaluate', {});
+      var fired = res && Array.isArray(res.fired) ? res.fired.length : PG.findVal(res || {}, ['fired_count']);
+      var evaluated = res && res.evaluated !== undefined ? res.evaluated : '?';
+      PG.notify('Evaluated ' + evaluated + ' rule(s) — ' + (fired === undefined ? '0' : fired) + ' fired', 'success');
+      loadFired();
+    } catch (e) {
+      PG.notify('Evaluate failed: ' + (e && e.message ? e.message : e), 'error');
+    } finally { btn.disabled = false; }
+  }
+
+  async function loadFired() {
+    var box = $('firedBox');
+    PG.loading(box, 'Loading fired alerts…');
+    try {
+      var raw = await PG.api('get', '/api/alerts/fired?limit=50');
+      var rows = Array.isArray(raw) ? raw : PG.extractRows(raw);
+      rows = rows.filter(function (r) { return r && typeof r === 'object'; });
+      box.innerHTML = '';
+      box.appendChild(PG.table(rows, {
+        columns: [
+          { key: 'fired_at', label: 'Fired at' },
+          { key: 'rule_id', label: 'Rule' },
+          { key: 'symbol', label: 'Symbol' },
+          { key: 'message', label: 'Message' },
+          { key: 'delivered', label: 'Delivered', render: function (r) {
+              var ok = r.delivered === 1 || r.delivered === true;
+              return PG.mk('span', { class: 'pg-badge' + (ok ? '' : ' off') }, [ok ? 'telegram' : 'local']);
+            } }
+        ],
+        onRow: PG.openStock
+      }));
+    } catch (e) {
+      PG.errBox(box, 'Fired alerts failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  /* ---------- boot ---------- */
+
+  async function refreshPortfolio() {
+    await loadPerformance();
+    await loadPositions();
+  }
+
+  function init() {
+    PG.boot('portfolio');
+    $('posForm').addEventListener('submit', submitPosition);
+    $('ruleForm').addEventListener('submit', submitRule);
+    $('evalBtn').addEventListener('click', evaluateNow);
+    buildRuleTypePicker();
+    refreshPortfolio();
+    loadRules();
+    loadFired();
+  }
+
+  document.addEventListener('DOMContentLoaded', init);
+})();
+</script>
+</body>
+</html>

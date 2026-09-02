@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard — EGX Decision Engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<div class="app">
+  <aside id="sidebar"></aside>
+  <div class="main">
+    <header id="topbar"></header>
+    <main class="content">
+
+      <div class="stat-row" id="stat-row">
+        <div class="stat"><div class="stat-label">Advancers</div><div class="stat-value up" id="st-adv">—</div></div>
+        <div class="stat"><div class="stat-label">Decliners</div><div class="stat-value down" id="st-dec">—</div></div>
+        <div class="stat"><div class="stat-label">Unchanged</div><div class="stat-value flat" id="st-unch">—</div></div>
+        <div class="stat"><div class="stat-label">% Advancing</div><div class="stat-value" id="st-padv">—</div></div>
+        <div class="stat"><div class="stat-label">Session (Cairo)</div><div class="stat-value" id="st-session" style="font-size:15px">—</div><div class="stat-sub" id="st-session-sub"></div></div>
+      </div>
+
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-title"><span>Global snapshot</span></div>
+        <div id="global-strip"><div class="skeleton"><div class="sk-line" style="width:70%"></div></div></div>
+      </div>
+
+      <div class="grid grid-3" style="margin-bottom:14px">
+        <div class="card">
+          <div class="card-title"><span>Top gainers</span></div>
+          <div id="tbl-gainers"></div>
+        </div>
+        <div class="card">
+          <div class="card-title"><span>Top losers</span></div>
+          <div id="tbl-losers"></div>
+        </div>
+        <div class="card">
+          <div class="card-title"><span>Most active</span></div>
+          <div id="tbl-active"></div>
+        </div>
+      </div>
+
+      <div class="grid grid-main" style="margin-bottom:14px">
+        <div class="card" style="margin:0">
+          <div class="card-title"><span>Sector heatmap</span><span class="as-of muted" id="sectors-asof"></span></div>
+          <div id="heatmap"></div>
+        </div>
+        <div class="card" style="margin:0">
+          <div class="card-title"><span>Candidates</span><span class="as-of muted" id="cands-asof"></span></div>
+          <div id="candidates"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <span>Morning brief</span>
+          <button class="btn small" id="btn-brief">Generate</button>
+        </div>
+        <div id="brief-box"></div>
+      </div>
+
+    </main>
+    <footer class="footer">
+      <span>Analysis tooling — not financial advice. Data delayed ~15 min.</span>
+      <span class="muted">EGX Decision Engine · local</span>
+    </footer>
+  </div>
+</div>
+
+<script src="assets/api.js"></script>
+<script src="assets/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+  var U = window.UI;
+
+  document.addEventListener("DOMContentLoaded", function () {
+    renderSidebar("dashboard");
+    renderTopbar("Dashboard");
+    renderMobileNav("dashboard");
+    loadOverview();
+    loadGlobal();
+    loadSectors();
+    loadCandidates();
+    loadBrief();
+    document.getElementById("btn-brief").addEventListener("click", generateBrief);
+  });
+
+  /* ---------- shared table builder ---------- */
+
+  function stockTable(rows, changeKeyFirst) {
+    if (!rows || !rows.length) return el("div", { class: "empty-note", text: "No rows returned." });
+    var tbody = el("tbody");
+    rows.slice(0, 8).forEach(function (row) {
+      var sym = U.symbolOf(row) || "?";
+      var price = U.pickNum(row, U.KEYS.PRICE);
+      var chg = U.pickNum(row, U.KEYS.CHANGE);
+      var vol = U.pickNum(row, U.KEYS.VOLUME);
+      tbody.appendChild(el("tr", {
+        style: { cursor: "pointer" },
+        onclick: function () { window.location.href = "stock.html?symbol=" + encodeURIComponent(sym); },
+      }, [
+        el("td", {}, el("a", { class: "sym", href: "stock.html?symbol=" + encodeURIComponent(sym), text: sym, onclick: function (e) { e.stopPropagation(); } })),
+        el("td", { class: "num", text: fmtNum(price) }),
+        el("td", { class: "num" }, fmtPct(chg)),
+        el("td", { class: "num muted", text: fmtCompact(vol) }),
+      ]));
+    });
+    return el("div", { class: "tbl-wrap" }, el("table", { class: "tbl" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", { text: "Symbol" }), el("th", { class: "num", text: "Price" }),
+        el("th", { class: "num", text: changeKeyFirst || "Chg %" }), el("th", { class: "num", text: "Vol" }),
+      ])),
+      tbody,
+    ]));
+  }
+
+  function allStockRows(ov) {
+    var seen = {}, out = [];
+    ["gainers", "top_gainers", "losers", "top_losers", "most_active", "active", "stocks", "results", "data", "overview"].forEach(function (hint) {
+      var arr = U.firstArray(ov, [hint]) || [];
+      arr.forEach(function (r) {
+        var s = U.symbolOf(r);
+        if (s && !seen[s]) { seen[s] = 1; out.push(r); }
+      });
+    });
+    return out;
+  }
+
+  /* ---------- overview: breadth + gainers/losers/active ---------- */
+
+  function loadOverview() {
+    var boxes = ["tbl-gainers", "tbl-losers", "tbl-active"].map(function (id) { return document.getElementById(id); });
+    boxes.forEach(function (b) { U.clear(b).appendChild(U.skeleton(5)); });
+
+    API.get("/api/market/overview").then(function (ov) {
+      // breadth (Module B guarantees this key)
+      var br = U.pick(ov, ["breadth"]) || {};
+      setText("st-adv", fmtNum(U.pickNum(br, ["advancers", "advancing", "up"]), 0));
+      setText("st-dec", fmtNum(U.pickNum(br, ["decliners", "declining", "down"]), 0));
+      setText("st-unch", fmtNum(U.pickNum(br, ["unchanged", "flat"]), 0));
+      var padv = U.pickNum(br, ["pct_advancing", "pctAdvancing", "advancing_pct"]);
+      setText("st-padv", padv === null ? "—" : padv.toFixed(1) + "%");
+
+      var sess = U.pick(ov, ["session"]) || {};
+      var open = !!U.pick(sess, ["open", "is_open"]);
+      var sEl = document.getElementById("st-session");
+      sEl.textContent = open ? "OPEN" : "CLOSED";
+      sEl.className = "stat-value " + (open ? "up" : "down");
+      var nowC = U.pick(sess, ["now_cairo", "now"]);
+      var nextO = U.pick(sess, ["next_open", "nextOpen"]);
+      setText("st-session-sub", open ? (typeof nowC === "string" ? nowC.slice(11, 16) + " Cairo" : "") : (typeof nextO === "string" ? "next: " + nextO.slice(0, 16).replace("T", " ") : ""));
+
+      // gainers / losers / most active — defensive with sorted fallback
+      var all = allStockRows(ov);
+      var gainers = U.firstArray(ov, ["top_gainers", "gainers"]);
+      var losers = U.firstArray(ov, ["top_losers", "losers"]);
+      var active = U.firstArray(ov, ["most_active", "active", "volume_leaders", "top_volume"]);
+      var byChg = all.slice().sort(function (a, b) { return (U.pickNum(b, U.KEYS.CHANGE) || 0) - (U.pickNum(a, U.KEYS.CHANGE) || 0); });
+      if (!gainers || !gainers.length) gainers = byChg.slice(0, 8);
+      if (!losers || !losers.length) losers = byChg.slice().reverse().slice(0, 8);
+      if (!active || !active.length) {
+        active = all.slice().sort(function (a, b) { return (U.pickNum(b, U.KEYS.VOLUME) || 0) - (U.pickNum(a, U.KEYS.VOLUME) || 0); }).slice(0, 8);
+      }
+      U.clear(boxes[0]).appendChild(stockTable(gainers));
+      U.clear(boxes[1]).appendChild(stockTable(losers));
+      U.clear(boxes[2]).appendChild(stockTable(active));
+    }).catch(function (e) {
+      boxes.forEach(function (b) { U.clear(b).appendChild(U.errorBox("Market overview: " + e.message)); });
+      setText("st-session-sub", "overview unavailable");
+    });
+  }
+
+  /* ---------- global snapshot strip ---------- */
+
+  function loadGlobal() {
+    var box = document.getElementById("global-strip");
+    U.load(box, function () { return API.get("/api/market/global"); }, function (c, snap) {
+      var strip = el("div", { class: "strip" });
+      var rows = U.firstArray(snap, ["markets", "indices", "snapshot", "results", "data"]);
+      if (rows) {
+        rows.slice(0, 14).forEach(function (r) {
+          strip.appendChild(stripItem(U.pick(r, ["name", "symbol", "ticker", "index"]) || "?", U.pickNum(r, U.KEYS.PRICE), U.pickNum(r, U.KEYS.CHANGE)));
+        });
+      } else if (snap && typeof snap === "object") {
+        // object keyed by market name
+        var count = 0;
+        for (var k in snap) {
+          if (count >= 14) break;
+          var v = snap[k];
+          if (v && typeof v === "object") {
+            strip.appendChild(stripItem(k, U.pickNum(v, U.KEYS.PRICE), U.pickNum(v, U.KEYS.CHANGE)));
+            count++;
+          } else if (typeof v === "number") {
+            strip.appendChild(stripItem(k, v, null));
+            count++;
+          }
+        }
+      }
+      if (!strip.childNodes.length) { c.appendChild(U.renderObject(snap)); return; }
+      c.appendChild(strip);
+    }, { lines: 2, label: "Global snapshot" });
+  }
+
+  function stripItem(name, val, chg) {
+    var it = el("span", { class: "strip-item" }, [
+      el("span", { class: "si-name", text: String(name) }),
+      el("span", { class: "si-val", text: fmtNum(val) }),
+    ]);
+    if (chg !== null && chg !== undefined) it.appendChild(fmtPct(chg));
+    return it;
+  }
+
+  /* ---------- sector heatmap ---------- */
+
+  function loadSectors() {
+    var box = document.getElementById("heatmap");
+    U.load(box, function () { return API.get("/api/market/sectors"); }, function (c, data) {
+      var asof = U.pick(data, ["as_of", "asOf", "timestamp"]);
+      if (typeof asof === "string") setText("sectors-asof", asof.slice(0, 16).replace("T", " "));
+
+      var rows = U.firstArray(data, ["sectors", "results", "data", "scan"]);
+      var tiles = [];
+      if (rows) {
+        rows.forEach(function (r) {
+          var name = U.pick(r, ["sector", "name", "sector_name", "label"]);
+          if (!name || typeof name !== "string") return;
+          tiles.push({
+            name: name,
+            chg: U.pickNum(r, ["avg_change_pct", "avg_change", "change_pct", "changePercent", "change", "performance", "pct"]),
+            extra: U.pickNum(r, ["count", "stocks", "n", "symbols_count"]),
+          });
+        });
+      } else if (data && typeof data === "object") {
+        for (var k in data) {
+          var v = data[k];
+          if (v && typeof v === "object" && !Array.isArray(v)) {
+            var chg = U.pickNum(v, ["avg_change_pct", "avg_change", "change_pct", "change", "performance"]);
+            if (chg !== null || U.pick(v, ["sector", "name"])) tiles.push({ name: k, chg: chg, extra: null });
+          }
+        }
+      }
+      if (!tiles.length) { c.appendChild(U.renderObject(data)); return; }
+
+      tiles.sort(function (a, b) { return (b.chg || 0) - (a.chg || 0); });
+      var grid = el("div", { class: "heatmap" });
+      tiles.forEach(function (t) {
+        var chg = t.chg;
+        var bg = "var(--panel2)";
+        if (chg !== null) {
+          var alpha = Math.min(0.5, Math.abs(chg) / 5 + 0.06);
+          bg = chg >= 0 ? "rgba(52,199,123," + alpha.toFixed(2) + ")" : "rgba(229,83,75," + alpha.toFixed(2) + ")";
+        }
+        grid.appendChild(el("div", { class: "heat-tile", style: { background: bg }, title: t.name }, [
+          el("div", { class: "heat-name", text: t.name }),
+          el("div", { class: "heat-pct " + U.changeClass(chg), text: chg === null ? "—" : (chg > 0 ? "+" : "") + chg.toFixed(2) + "%" }),
+        ]));
+      });
+      c.appendChild(grid);
+    }, { lines: 5, label: "Sectors" });
+  }
+
+  /* ---------- candidates panel ---------- */
+
+  function loadCandidates() {
+    var box = document.getElementById("candidates");
+    U.load(box, function () { return API.get("/api/screener/candidates"); }, function (c, data) {
+      var asof = U.pick(data, ["as_of", "asOf"]);
+      if (typeof asof === "string") setText("cands-asof", asof.slice(0, 16).replace("T", " "));
+      // Use the canonical key directly (even when empty) so an empty scan
+      // never falls through to unrelated arrays like scanner_errors.
+      var rows = (data && Array.isArray(data.candidates))
+        ? data.candidates
+        : (U.firstArray(data, ["candidates", "results"]) || []);
+      if (!rows.length) { c.appendChild(el("div", { class: "empty-note", text: "No candidates from today's scans." })); return; }
+
+      var tbody = el("tbody");
+      rows.slice(0, 10).forEach(function (r) {
+        var sym = U.symbolOf(r) || "?";
+        var score = U.pickNum(r, ["score", "total_score", "stock_score"]);
+        var scanners = U.pick(r, ["scanners", "hits", "sources", "matched"]);
+        var badges = el("div");
+        (Array.isArray(scanners) ? scanners : (typeof scanners === "string" ? [scanners] : [])).forEach(function (s) {
+          badges.appendChild(el("span", { class: "hit-badge", text: String(s) }));
+        });
+        tbody.appendChild(el("tr", {
+          style: { cursor: "pointer" },
+          onclick: function () { window.location.href = "stock.html?symbol=" + encodeURIComponent(sym); },
+        }, [
+          el("td", {}, [
+            el("a", { class: "sym", href: "stock.html?symbol=" + encodeURIComponent(sym), text: sym, onclick: function (e) { e.stopPropagation(); } }),
+            badges,
+          ]),
+          el("td", { class: "num", text: fmtNum(U.pickNum(r, U.KEYS.PRICE)) }),
+          el("td", { class: "num" }, fmtPct(U.pickNum(r, U.KEYS.CHANGE))),
+          el("td", { class: "num", text: score === null ? "—" : fmtNum(score, 1) }),
+        ]));
+      });
+      c.appendChild(el("div", { class: "tbl-wrap" }, el("table", { class: "tbl" }, [
+        el("thead", {}, el("tr", {}, [
+          el("th", { text: "Symbol / scanners" }), el("th", { class: "num", text: "Price" }),
+          el("th", { class: "num", text: "Chg %" }), el("th", { class: "num", text: "Score" }),
+        ])),
+        tbody,
+      ])));
+    }, { pill: "Running scanners… (can take a minute)", label: "Candidates" });
+  }
+
+  /* ---------- morning brief ---------- */
+
+  function loadBrief() {
+    var box = document.getElementById("brief-box");
+    U.clear(box).appendChild(U.skeleton(3));
+    API.get("/api/brief/latest?kind=morning").then(function (b) {
+      renderBrief(box, b);
+    }).catch(function (e) {
+      U.clear(box).appendChild(el("div", { class: "empty-note", text: "No morning brief yet (" + e.message + "). Use Generate." }));
+    });
+  }
+
+  function renderBrief(box, b) {
+    U.clear(box);
+    var content = U.pick(b, ["content", "text", "brief", "body"]);
+    if (typeof content !== "string" || !content.trim()) { box.appendChild(U.renderObject(b)); return; }
+    var date = U.pick(b, ["date", "created_at"]);
+    if (typeof date === "string") box.appendChild(el("div", { class: "muted", style: { fontSize: "11px", marginBottom: "8px" }, text: date }));
+    box.appendChild(el("div", { class: "brief-text", text: content }));
+  }
+
+  function generateBrief() {
+    var btn = document.getElementById("btn-brief");
+    var box = document.getElementById("brief-box");
+    btn.disabled = true;
+    U.clear(box).appendChild(U.loadingPill("Generating morning brief… (LLM call, may take ~1 min)"));
+    API.post("/api/brief/morning").then(function (b) {
+      renderBrief(box, b);
+      toast("Morning brief generated.", "success");
+    }).catch(function (e) {
+      U.clear(box).appendChild(U.errorBox("Brief generation failed: " + e.message));
+      toast("Brief failed: " + e.message, "error");
+    }).finally(function () { btn.disabled = false; });
+  }
+
+  function setText(id, txt) {
+    var n = document.getElementById(id);
+    if (n) n.textContent = txt;
+  }
+})();
+</script>
+</body>
+</html>

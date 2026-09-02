@@ -1,0 +1,612 @@
+"""Screener services for the EGX Decision Engine.
+
+Wraps the tradingview_mcp core scanners behind a uniform registry
+(``SCANNERS``), a single dispatcher (``run_scanner``) and the flagship
+``candidates()`` aggregation that merges hits across scanners, scores the
+top merged symbols and ranks them.
+
+All scanners run against EGX:
+- batched scanners (volume breakout, smart volume, bollinger squeeze,
+  consecutive candles) take the lowercase exchange key ``"egx"`` — that is
+  how ``EXCHANGE_SCREENER``/``load_symbols`` resolve the "egypt" screener;
+- ``analyze_coin`` takes ``"EGX"`` (case-insensitive helpers downstream);
+- ``scan_egx_smart_money`` / ``screen_egx_stocks`` are EGX-only already.
+
+No function in this module raises: failures are returned as
+``{"error": ...}`` payloads (or, inside ``candidates()``, collected into a
+``"scanner_errors"`` list).
+"""
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timezone
+from typing import Any, Callable, Optional
+
+from tradingview_mcp.core.errors import PartialDataError
+from tradingview_mcp.core.services.egx_service import screen_egx_stocks
+from tradingview_mcp.core.services.scanner_service import (
+    smart_volume_scan,
+    volume_breakout_scan,
+)
+from tradingview_mcp.core.services.screener_service import (
+    analyze_coin,
+    fetch_bollinger_analysis,
+    scan_consecutive_candles,
+)
+from tradingview_mcp.core.services.smart_money_service import scan_egx_smart_money
+
+logger = logging.getLogger(__name__)
+
+# Lowercase key used by the batched core scanners (EXCHANGE_SCREENER["egx"]
+# -> "egypt" screener; the uppercase form would fall back to "crypto").
+_EGX_LOWER = "egx"
+# Exchange identifier for single-symbol analysis (validators lowercase it).
+_EGX_UPPER = "EGX"
+
+# Bound on the number of merged symbols that get the expensive per-symbol
+# analyze_coin() scoring pass inside candidates().
+_SCORE_TOP_N = 15
+
+
+# ── Registry ───────────────────────────────────────────────────────────────────
+
+SCANNERS: dict[str, dict] = {
+    "squeeze": {
+        "label": "Bollinger Squeeze",
+        "description": (
+            "Stocks with compressed Bollinger Band width (BBW below bbw_max) — "
+            "low-volatility coils that often precede expansion moves."
+        ),
+        "params": {"timeframe": "1D", "limit": 50, "bbw_max": 0.04},
+    },
+    "volume_breakout": {
+        "label": "Volume Breakout",
+        "description": (
+            "Simultaneous volume surge (volume_multiplier x 20-bar average) "
+            "and price move of at least price_change_min percent."
+        ),
+        "params": {
+            "timeframe": "1D",
+            "volume_multiplier": 2.0,
+            "price_change_min": 3.0,
+            "limit": 25,
+        },
+    },
+    "smart_volume": {
+        "label": "Smart Volume",
+        "description": (
+            "Volume breakouts filtered by RSI regime (oversold / overbought / "
+            "neutral / any) with a trading recommendation per hit."
+        ),
+        "params": {
+            "min_volume_ratio": 2.0,
+            "min_price_change": 2.0,
+            "rsi_range": "any",
+            "limit": 20,
+        },
+    },
+    "momentum": {
+        "label": "Momentum Candles",
+        "description": (
+            "Strong directional candle today (body dominance, trend alignment, "
+            "healthy RSI), then verified against real daily history: only "
+            "symbols with candle_count consecutive closes in the pattern "
+            "direction survive."
+        ),
+        "params": {
+            "timeframe": "1D",
+            "pattern_type": "bullish",
+            "candle_count": 3,
+            "min_growth": 1.0,
+            "limit": 25,
+        },
+    },
+    "smart_money": {
+        "label": "Smart Money Flow",
+        "description": (
+            "EGX index constituents ranked by smart-money evidence "
+            "(volume-flow composite, MCDX-style banker read, oscillator)."
+        ),
+        "params": {"index": "EGX30", "limit": 10, "period": "6mo", "min_score": 0.0},
+    },
+    "custom": {
+        "label": "EGX Stock Screen",
+        "description": (
+            "Full EGX ranking engine: stock score, grade, trade setups and "
+            "quality — screen_egx_stocks passthrough."
+        ),
+        "params": {"timeframe": "1D", "min_score": 55, "index_filter": "", "limit": 20},
+    },
+}
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _now_iso() -> str:
+    """Current time as ISO string (Cairo when available, UTC otherwise)."""
+    try:
+        from app.calendar_egx import now_cairo
+
+        return now_cairo().isoformat()
+    except Exception:
+        return datetime.now(timezone.utc).isoformat()
+
+
+def _coerce_params(defaults: dict[str, Any], provided: dict[str, Any]) -> dict[str, Any]:
+    """Merge user params onto registry defaults, casting to the default's type.
+
+    Unknown keys are ignored; values that fail to cast keep the default.
+    """
+    merged: dict[str, Any] = dict(defaults)
+    for name, default in defaults.items():
+        if name not in provided or provided[name] is None:
+            continue
+        value = provided[name]
+        try:
+            if isinstance(default, bool):
+                merged[name] = str(value).strip().lower() in ("1", "true", "yes", "on")
+            elif isinstance(default, int):
+                merged[name] = int(float(value))
+            elif isinstance(default, float):
+                merged[name] = float(value)
+            else:
+                merged[name] = str(value)
+        except (TypeError, ValueError):
+            logger.warning("Scanner param %r=%r not coercible; using default %r",
+                           name, value, default)
+    return merged
+
+
+def _bare_symbol(symbol: Optional[str]) -> str:
+    """'EGX:COMI' / 'comi' -> 'COMI'."""
+    if not symbol:
+        return ""
+    sym = str(symbol).strip().upper()
+    if ":" in sym:
+        sym = sym.split(":", 1)[-1]
+    return sym
+
+
+def _row_price_change(key: str, row: dict) -> tuple[Optional[float], Optional[float]]:
+    """Best-effort (price, change_pct) extraction from one scanner row."""
+    try:
+        if key in ("squeeze", "volume_breakout", "smart_volume"):
+            indicators = row.get("indicators") or {}
+            return indicators.get("close"), row.get("changePercent")
+        if key == "momentum":
+            return row.get("price"), row.get("current_change")
+        if key == "smart_money":
+            return row.get("last_close"), None
+        if key == "custom":
+            return row.get("price"), row.get("change_pct")
+    except Exception:
+        pass
+    return None, None
+
+
+# ── Per-scanner runners ────────────────────────────────────────────────────────
+# Each returns {"results": [...], "meta": {...}} or {"error": ...}.
+
+def _run_squeeze(p: dict) -> dict:
+    rows = fetch_bollinger_analysis(
+        _EGX_LOWER,
+        timeframe=p["timeframe"],
+        limit=int(p["limit"]),
+        bbw_filter=float(p["bbw_max"]),
+    )
+    return {"results": list(rows), "meta": {"bbw_max": p["bbw_max"]}}
+
+
+def _run_volume_breakout(p: dict) -> dict:
+    rows = volume_breakout_scan(
+        _EGX_LOWER,
+        timeframe=p["timeframe"],
+        volume_multiplier=float(p["volume_multiplier"]),
+        price_change_min=float(p["price_change_min"]),
+        limit=int(p["limit"]),
+    )
+    return {"results": list(rows), "meta": {}}
+
+
+def _run_smart_volume(p: dict) -> dict:
+    rows = smart_volume_scan(
+        _EGX_LOWER,
+        min_volume_ratio=float(p["min_volume_ratio"]),
+        min_price_change=float(p["min_price_change"]),
+        rsi_range=str(p["rsi_range"]),
+        limit=int(p["limit"]),
+    )
+    return {"results": list(rows), "meta": {}}
+
+
+#: Cap on per-run Yahoo history lookups for consecutive-candle verification.
+_MOMENTUM_VERIFY_MAX = 15
+
+
+def _verify_consecutive(rows: list[dict], candle_count: int, pattern_type: str) -> tuple[list[dict], int]:
+    """Check the scanner's single-bar hits against real daily history.
+
+    The core scan inspects one completed bar; the "consecutive candles" claim
+    is only true if the last ``candle_count`` daily closes actually step in
+    the pattern's direction with matching bodies. Verified rows are kept and
+    tagged, failures are dropped; rows beyond the Yahoo budget or with
+    unavailable history are kept tagged ``consecutive_verified: None``.
+    """
+    if candle_count < 2 or pattern_type not in ("bullish", "bearish"):
+        return rows, 0
+    from app.services import history
+
+    kept: list[dict] = []
+    dropped = 0
+    checked = 0
+    for row in rows:
+        sym = _bare_symbol(row.get("symbol"))
+        if not sym or checked >= _MOMENTUM_VERIFY_MAX:
+            row["consecutive_verified"] = None
+            kept.append(row)
+            continue
+        checked += 1
+        h = history.get_history(sym, "3mo", "1d")
+        candles = h.get("candles") if isinstance(h, dict) else None
+        if not candles or len(candles) < candle_count + 1:
+            row["consecutive_verified"] = None
+            kept.append(row)
+            continue
+        recent = candles[-candle_count:]
+        prev_close = candles[-candle_count - 1]["close"]
+        if pattern_type == "bullish":
+            steps = all(recent[i]["close"] > recent[i - 1]["close"] for i in range(1, len(recent)))
+            bodies = all(c["close"] > c["open"] for c in recent)
+            ok = steps and bodies and recent[0]["close"] > prev_close
+        else:
+            steps = all(recent[i]["close"] < recent[i - 1]["close"] for i in range(1, len(recent)))
+            bodies = all(c["close"] < c["open"] for c in recent)
+            ok = steps and bodies and recent[0]["close"] < prev_close
+        if ok:
+            row["consecutive_verified"] = True
+            kept.append(row)
+        else:
+            dropped += 1
+    return kept, dropped
+
+
+def _run_momentum(p: dict) -> dict:
+    res = scan_consecutive_candles(
+        _EGX_LOWER,
+        p["timeframe"],
+        str(p["pattern_type"]),
+        int(p["candle_count"]),
+        float(p["min_growth"]),
+        int(p["limit"]),
+    )
+    if not isinstance(res, dict):
+        return {"error": f"Unexpected momentum scan result: {res!r}"}
+    if "error" in res:
+        return {"error": res["error"]}
+    rows = list(res.get("data") or [])
+    dropped = 0
+    if str(p["timeframe"]).upper() == "1D":
+        rows, dropped = _verify_consecutive(
+            rows, int(p["candle_count"]), str(p["pattern_type"])
+        )
+    meta = {k: v for k, v in res.items() if k != "data"}
+    meta["consecutive_dropped"] = dropped
+    return {"results": rows, "meta": meta}
+
+
+def _run_smart_money(p: dict) -> dict:
+    res = scan_egx_smart_money(
+        index=str(p["index"]),
+        limit=int(p["limit"]),
+        period=str(p["period"]),
+        min_score=float(p["min_score"]),
+    )
+    if not isinstance(res, dict):
+        return {"error": f"Unexpected smart-money scan result: {res!r}"}
+    if "error" in res:
+        return {"error": res["error"]}
+    meta = {k: v for k, v in res.items() if k != "rows"}
+    return {"results": list(res.get("rows") or []), "meta": meta}
+
+
+def _run_custom(p: dict) -> dict:
+    res = screen_egx_stocks(
+        timeframe=str(p["timeframe"]),
+        min_score=int(p["min_score"]),
+        index_filter=str(p["index_filter"]),
+        limit=int(p["limit"]),
+    )
+    if not isinstance(res, dict):
+        return {"error": f"Unexpected EGX screen result: {res!r}"}
+    if "error" in res:
+        return {"error": res["error"]}
+    results: list[dict] = []
+    for row in res.get("qualified_trades") or []:
+        results.append({**row, "bucket": "qualified"})
+    for row in res.get("watchlist") or []:
+        results.append({**row, "bucket": "watchlist"})
+    meta = {k: v for k, v in res.items() if k not in ("qualified_trades", "watchlist")}
+    return {"results": results, "meta": meta}
+
+
+_DISPATCH: dict[str, Callable[[dict], dict]] = {
+    "squeeze": _run_squeeze,
+    "volume_breakout": _run_volume_breakout,
+    "smart_volume": _run_smart_volume,
+    "momentum": _run_momentum,
+    "smart_money": _run_smart_money,
+    "custom": _run_custom,
+}
+
+
+# ── Public API ─────────────────────────────────────────────────────────────────
+
+def run_scanner(key: str, params: Optional[dict] = None) -> dict:
+    """Run one registered scanner against EGX.
+
+    Args:
+        key:    Registry key from ``SCANNERS``.
+        params: Optional overrides for the scanner's registered params
+                (string values from query strings are coerced).
+
+    Returns:
+        ``{"scanner": key, "results": [...], "as_of": iso, "params": {...}}``
+        plus scanner-specific ``"meta"``; ``"partial": True`` with a note when
+        a batched scan aborted early but salvaged rows; or an error payload
+        ``{"scanner": key, "error": ..., "as_of": iso}``. Never raises.
+    """
+    as_of = _now_iso()
+    spec = SCANNERS.get(key)
+    if spec is None:
+        return {
+            "scanner": key,
+            "error": f"Unknown scanner '{key}'. Available: {', '.join(SCANNERS)}",
+            "as_of": as_of,
+        }
+
+    merged = _coerce_params(spec["params"], params or {})
+
+    try:
+        outcome = _DISPATCH[key](merged)
+    except PartialDataError as exc:
+        # Batched scan aborted mid-flight but collected usable rows.
+        return {
+            "scanner": key,
+            "results": list(getattr(exc, "rows", None) or []),
+            "as_of": as_of,
+            "params": merged,
+            "partial": True,
+            "note": str(exc),
+        }
+    except Exception as exc:  # BatchExecutionError, ScreenerServiceError, ...
+        logger.warning("Scanner %s failed: %s", key, exc)
+        return {"scanner": key, "error": str(exc), "as_of": as_of, "params": merged}
+
+    if "error" in outcome:
+        return {"scanner": key, "error": outcome["error"], "as_of": as_of, "params": merged}
+
+    result = {
+        "scanner": key,
+        "results": outcome.get("results") or [],
+        "as_of": as_of,
+        "params": merged,
+    }
+    if outcome.get("meta"):
+        result["meta"] = outcome["meta"]
+    return result
+
+
+# Default parameterisation used by candidates() for each contributing scanner.
+# smart_money min_score is on the composite's 0-100 scale — 58 is the
+# ACCUMULATION threshold; the old 0.5 was no filter at all, which handed the
+# top-15 EGX30 names a free hit every day.
+_CANDIDATE_RUNS: dict[str, dict[str, Any]] = {
+    "squeeze": {"limit": 40, "bbw_max": 0.04},
+    "volume_breakout": {"volume_multiplier": 1.8, "price_change_min": 2.0, "limit": 25},
+    "smart_money": {"index": "EGX30", "limit": 15, "period": "6mo", "min_score": 58.0},
+    "momentum": {"pattern_type": "bullish", "candle_count": 3, "min_growth": 1.0, "limit": 25},
+}
+
+# Signal families for candidate ranking. volume_breakout and momentum measure
+# the SAME daily bar (a big up-day on volume trips both), so a raw hit count
+# double-counts one piece of evidence; ranking counts distinct families.
+_SCANNER_FAMILY: dict[str, str] = {
+    "squeeze": "coil",
+    "volume_breakout": "thrust",
+    "momentum": "thrust",
+    "smart_money": "flow",
+}
+
+
+def _family_count(scanners: list[str]) -> int:
+    return len({_SCANNER_FAMILY.get(s, s) for s in scanners})
+
+
+def candidates(timeframe: str = "1D", persist: bool = False) -> dict:
+    """Merged multi-scanner candidate list — the flagship screen.
+
+    Runs squeeze + volume_breakout + smart_money + momentum with sane
+    defaults, merges hits by symbol, scores the top ``_SCORE_TOP_N`` merged
+    symbols via ``analyze_coin`` (stock score / signal / grade) and ranks by
+    (hit_count, score).
+
+    Args:
+        timeframe: TradingView interval for the timeframe-aware scanners.
+        persist:   When True, write one ``scanner_hits`` row per
+                   (scanner, symbol) hit.
+
+    Returns:
+        ``{"candidates": [...], "as_of": iso, "scanner_errors": [...]}``.
+        Individual scanner failures land in ``scanner_errors`` — this
+        function never raises.
+    """
+    as_of = _now_iso()
+    scanner_errors: list[dict] = []
+    try:
+        merged: dict[str, dict] = {}
+
+        for key, overrides in _CANDIDATE_RUNS.items():
+            run_params = dict(overrides)
+            if "timeframe" in SCANNERS[key]["params"]:
+                run_params["timeframe"] = timeframe
+            try:
+                res = run_scanner(key, run_params)
+            except Exception as exc:  # defensive: run_scanner should not raise
+                scanner_errors.append({"scanner": key, "error": str(exc)})
+                continue
+            if res.get("error"):
+                scanner_errors.append({"scanner": key, "error": res["error"]})
+                continue
+            for row in res.get("results") or []:
+                if not isinstance(row, dict):
+                    continue
+                # Candidates is a BULLISH shortlist: a -4% distribution day
+                # trips volume_breakout too, and merging it in by symbol would
+                # count it as a bullish confirmation.
+                if key == "volume_breakout" and str(row.get("breakout_type") or "").lower() == "bearish":
+                    continue
+                sym = _bare_symbol(row.get("symbol"))
+                if not sym:
+                    continue
+                entry = merged.setdefault(sym, {
+                    "symbol": sym,
+                    "scanners": [],
+                    "payloads": {},
+                    "price": None,
+                    "change_pct": None,
+                })
+                if key not in entry["scanners"]:
+                    entry["scanners"].append(key)
+                entry["payloads"][key] = row
+                price, change = _row_price_change(key, row)
+                if entry["price"] is None and price is not None:
+                    entry["price"] = price
+                if entry["change_pct"] is None and change is not None:
+                    entry["change_pct"] = change
+
+        # Preliminary rank to decide which symbols earn the expensive
+        # per-symbol scoring pass (bounded to _SCORE_TOP_N). Distinct signal
+        # FAMILIES, not raw scanner count — see _SCANNER_FAMILY.
+        ranked = sorted(
+            merged.values(),
+            key=lambda e: (_family_count(e["scanners"]), e["change_pct"] if e["change_pct"] is not None else 0.0),
+            reverse=True,
+        )
+
+        for entry in ranked[:_SCORE_TOP_N]:
+            entry["score"] = None
+            entry["grade"] = None
+            entry["signal"] = None
+            entry["rating"] = None
+            try:
+                analysis = analyze_coin(entry["symbol"], _EGX_UPPER, timeframe)
+            except Exception as exc:
+                logger.warning("analyze_coin(%s) failed: %s", entry["symbol"], exc)
+                continue
+            if not isinstance(analysis, dict) or "error" in analysis:
+                continue
+            entry["score"] = analysis.get("stock_score")
+            entry["grade"] = analysis.get("grade")
+            sentiment = analysis.get("market_sentiment") or {}
+            entry["signal"] = sentiment.get("buy_sell_signal")
+            entry["rating"] = sentiment.get("overall_rating")
+            price_data = analysis.get("price_data") or {}
+            if price_data.get("current_price") is not None:
+                entry["price"] = price_data["current_price"]
+            if price_data.get("change_percent") is not None:
+                entry["change_pct"] = price_data["change_percent"]
+
+        def _final_key(e: dict) -> tuple:
+            score = e.get("score")
+            return (
+                _family_count(e["scanners"]),   # independent evidence first
+                len(e["scanners"]),             # raw hits break family ties
+                score if isinstance(score, (int, float)) else -1.0,
+                e["change_pct"] if e["change_pct"] is not None else 0.0,
+            )
+
+        ranked.sort(key=_final_key, reverse=True)
+
+        # Liquidity gate: on EGX the tightest "setups" are often flatlined
+        # illiquid names. Filter candidates whose 20-day median traded value
+        # is KNOWN to be below the configured floor; unknown liquidity (thin
+        # snapshots table) is kept and simply reported as null.
+        from app.config import settings as _settings
+        from app.services.market import median_daily_value as _mdv
+
+        min_value = float(_settings.min_daily_value_egp)
+        filtered_illiquid = 0
+
+        out_rows: list[dict] = []
+        for entry in ranked:
+            liquidity = _mdv(entry["symbol"])
+            if liquidity is not None and liquidity < min_value:
+                filtered_illiquid += 1
+                continue
+            out_rows.append({
+                "symbol": entry["symbol"],
+                "scanners": entry["scanners"],
+                "hit_count": len(entry["scanners"]),
+                "family_count": _family_count(entry["scanners"]),
+                "score": entry.get("score"),
+                "grade": entry.get("grade"),
+                "price": entry.get("price"),
+                "change_pct": entry.get("change_pct"),
+                "signal": entry.get("signal"),
+                "rating": entry.get("rating"),
+                "liquidity_egp": liquidity,
+            })
+
+        if persist and ranked:
+            _persist_hits(ranked)
+
+        return {
+            "candidates": out_rows,
+            "as_of": as_of,
+            "timeframe": timeframe,
+            "scanner_errors": scanner_errors,
+            "scored_top_n": min(_SCORE_TOP_N, len(ranked)),
+            "filtered_illiquid": filtered_illiquid,
+            "min_daily_value_egp": min_value,
+        }
+    except Exception as exc:
+        logger.exception("candidates() failed")
+        return {
+            "error": str(exc),
+            "candidates": [],
+            "as_of": as_of,
+            "scanner_errors": scanner_errors,
+        }
+
+
+def _persist_hits(entries: list[dict]) -> None:
+    """Write one scanner_hits row per (scanner, symbol) hit. Best effort."""
+    try:
+        from app.calendar_egx import last_trading_day, now_cairo
+        from app.db import execute
+
+        now = now_cairo()
+        # Stamp hits with the SESSION the data belongs to (same policy as
+        # snapshots): a manual Friday run then dedupes against Thursday's
+        # scheduled run instead of minting rows for a non-trading date.
+        today = last_trading_day(now.date()).strftime("%Y-%m-%d")
+        created = now.isoformat()
+        for entry in entries:
+            for scanner_key, payload in (entry.get("payloads") or {}).items():
+                try:
+                    # OR REPLACE + the unique (date, scanner, symbol) index:
+                    # a manual run and the scheduled post-close run on the same
+                    # day update one row instead of duplicating the whole day.
+                    execute(
+                        "INSERT OR REPLACE INTO scanner_hits "
+                        "(date, scanner, symbol, payload_json, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (today, scanner_key, entry["symbol"],
+                         json.dumps(payload, default=str), created),
+                    )
+                except Exception as exc:
+                    logger.warning("Persist scanner hit %s/%s failed: %s",
+                                   scanner_key, entry["symbol"], exc)
+    except Exception as exc:
+        logger.warning("Persisting scanner hits failed entirely: %s", exc)

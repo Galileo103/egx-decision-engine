@@ -1,0 +1,86 @@
+/* ============================================================
+   Shared "PG" page framework styles.
+   Previously duplicated inline in screener.html, backtest.html and
+   portfolio.html — three copies that drifted apart. Layout tokens follow
+   app.css (--radius: 8px, 14px gaps) so the two systems agree.
+   ============================================================ */
+body { margin: 0; font-family: Archivo, system-ui, sans-serif; }
+
+.pg-layout { display: flex; min-height: 100vh; background: var(--bg, #0E1316); color: var(--ink, #E8E6DE); }
+#sidebar { flex: 0 0 auto; }
+.pg-main { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
+.pg-content { flex: 1 1 auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 14px; }
+.pg-footer { padding: 14px 24px; border-top: 1px solid var(--line, #26313A); color: var(--muted, #8B958F); font-size: 12px; }
+
+.pg-panel { background: var(--panel, #161D22); border: 1px solid var(--line, #26313A); border-radius: 8px; padding: 16px; }
+.pg-panel > h2 { margin: 0 0 12px; font-size: 13px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted, #8B958F); }
+
+.pg-tablewrap { overflow-x: auto; }
+.pg-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.pg-table th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line, #26313A); color: var(--muted, #8B958F); cursor: pointer; user-select: none; white-space: nowrap; text-transform: capitalize; font-weight: 600; }
+.pg-table th:focus-visible { outline: 2px solid var(--accent, #2FBFA0); outline-offset: -2px; }
+.pg-table th[data-sort="asc"]::after { content: " \25B2"; color: var(--accent, #2FBFA0); }
+.pg-table th[data-sort="desc"]::after { content: " \25BC"; color: var(--accent, #2FBFA0); }
+.pg-table td { padding: 8px 10px; border-bottom: 1px solid var(--line, #26313A); vertical-align: middle; }
+.pg-table tbody tr:hover { background: var(--panel2, #1C242A); }
+/* Numeric columns are right-aligned so decimal points line up — the whole
+   point of the tabular-nums font, which the old inline copies negated. */
+.pg-table td.pg-num, .pg-table th.pg-num { text-align: right; }
+.pg-num { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+.pg-empty { color: var(--muted, #8B958F); text-align: center; padding: 18px; }
+.pg-loading { padding: 22px; color: var(--muted, #8B958F); font-size: 13px; border-radius: 8px; background: linear-gradient(90deg, var(--panel2, #1C242A) 25%, var(--panel, #161D22) 50%, var(--panel2, #1C242A) 75%); background-size: 200% 100%; animation: pg-shimmer 1.4s infinite linear; }
+@keyframes pg-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .pg-loading { animation: none; } }
+.pg-error { border: 1px solid var(--down, #E5534B); color: var(--down, #E5534B); padding: 12px 14px; border-radius: 8px; background: rgba(229, 83, 75, .08); font-size: 13px; }
+.pg-muted { color: var(--muted, #8B958F); }
+
+.pg-form { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.pg-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted, #8B958F); }
+.pg-field input, .pg-field select { background: var(--panel2, #1C242A); border: 1px solid var(--line, #26313A); color: var(--ink, #E8E6DE); border-radius: 8px; padding: 8px 10px; font: inherit; min-width: 100px; }
+.pg-field input:focus, .pg-field select:focus { outline: 1px solid var(--accent, #2FBFA0); }
+
+.pg-btn { background: var(--accent, #2FBFA0); color: #06110D; border: none; border-radius: 8px; padding: 9px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+.pg-btn:hover { filter: brightness(1.08); }
+.pg-btn:disabled { opacity: .5; cursor: default; }
+.pg-btn.secondary { background: var(--panel2, #1C242A); color: var(--ink, #E8E6DE); border: 1px solid var(--line, #26313A); }
+.pg-btn.danger { background: transparent; color: var(--down, #E5534B); border: 1px solid var(--down, #E5534B); }
+.pg-btn.small { padding: 4px 10px; font-size: 12px; font-weight: 500; }
+
+.pg-badge { display: inline-block; padding: 2px 8px; margin: 1px 4px 1px 0; border-radius: 999px; background: var(--panel2, #1C242A); border: 1px solid var(--line, #26313A); font-size: 11px; color: var(--accent, #2FBFA0); white-space: nowrap; }
+.pg-badge.off { color: var(--muted, #8B958F); }
+
+.pg-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.pg-card { background: var(--panel2, #1C242A); border: 1px solid var(--line, #26313A); border-radius: 8px; padding: 12px 14px; }
+.pg-card .pg-card-label { font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted, #8B958F); margin-bottom: 6px; }
+.pg-card .pg-card-value { font-size: 20px; font-weight: 600; font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+.pg-kv { display: grid; grid-template-columns: minmax(140px, max-content) 1fr; gap: 6px 18px; font-size: 13px; }
+.pg-kv .pg-kv-k { color: var(--muted, #8B958F); text-transform: capitalize; }
+.pg-asof { font-size: 12px; margin-bottom: 8px; }
+.up { color: var(--up, #34C77B); }
+.down { color: var(--down, #E5534B); }
+details.pg-details summary { cursor: pointer; color: var(--muted, #8B958F); font-size: 13px; margin-bottom: 8px; }
+
+/* Tab strips + section furniture (used by screener and backtest; these were
+   page-specific rules in the old inline blocks and MUST live here now). */
+.pg-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line, #26313A); }
+.pg-tab { background: none; border: none; border-bottom: 2px solid transparent; color: var(--muted, #8B958F); font: inherit; padding: 9px 14px; cursor: pointer; }
+.pg-tab:hover { color: var(--ink, #E8E6DE); }
+.pg-tab.active { color: var(--accent, #2FBFA0); border-bottom-color: var(--accent, #2FBFA0); }
+.pg-tab:focus-visible { outline: 2px solid var(--accent, #2FBFA0); outline-offset: -2px; }
+.pg-subhead { margin: 14px 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted, #8B958F); }
+.pg-wf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+
+.pg-fallback-nav { display: flex; flex-direction: column; gap: 6px; padding: 18px 14px; min-width: 170px; border-right: 1px solid var(--line, #26313A); height: 100%; box-sizing: border-box; }
+.pg-fallback-nav .pg-brand { font-weight: 700; margin-bottom: 10px; color: var(--accent, #2FBFA0); }
+.pg-fallback-nav a { color: var(--muted, #8B958F); text-decoration: none; padding: 7px 10px; border-radius: 8px; font-size: 14px; }
+.pg-fallback-nav a.active, .pg-fallback-nav a:hover { background: var(--panel2, #1C242A); color: var(--ink, #E8E6DE); }
+
+/* Narrow screens: the sidebar is hidden by app.css below 860px, so these
+   pages need their own reachable navigation (see ui.js mobile nav bar). */
+@media (max-width: 860px) {
+  .pg-content { padding: 14px; }
+  .pg-form { gap: 10px; }
+  .pg-field { flex: 1 1 140px; }
+}

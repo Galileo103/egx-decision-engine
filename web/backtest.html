@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backtest — EGX Decision Engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+<link rel="stylesheet" href="/assets/pg.css">
+</head>
+<body>
+<div class="pg-layout">
+  <aside id="sidebar"></aside>
+  <div class="pg-main">
+    <header id="topbar"></header>
+    <main class="pg-content">
+      <section class="pg-panel">
+        <h2>Backtest setup</h2>
+        <form class="pg-form" id="btForm">
+          <label class="pg-field">Symbol
+            <input id="fSymbol" type="text" list="symlist" placeholder="COMI" autocomplete="off" required>
+          </label>
+          <label class="pg-field">Strategy
+            <select id="fStrategy"></select>
+          </label>
+          <label class="pg-field">Period
+            <!-- Engine accepts exactly {1mo,3mo,6mo,1y,2y} × {1d,1h}; anything
+                 else always errors, so don't offer it. -->
+            <select id="fPeriod">
+              <option value="1mo">1mo</option>
+              <option value="3mo">3mo</option>
+              <option value="6mo">6mo</option>
+              <option value="1y" selected>1y</option>
+              <option value="2y">2y</option>
+            </select>
+          </label>
+          <label class="pg-field">Interval
+            <select id="fInterval">
+              <option value="1d" selected>1d</option>
+              <option value="1h">1h</option>
+            </select>
+          </label>
+          <label class="pg-field">Commission %
+            <input id="fCommission" type="number" step="any" min="0" value="0.3">
+          </label>
+          <label class="pg-field">Slippage %
+            <input id="fSlippage" type="number" step="any" min="0" value="0.1">
+          </label>
+          <label class="pg-field">Initial capital (EGP)
+            <input id="fCapital" type="number" step="any" min="1" value="100000">
+          </label>
+          <button type="submit" class="pg-btn" id="runBtn">Run backtest</button>
+          <button type="button" class="pg-btn secondary" id="compareBtn">Compare all</button>
+          <button type="button" class="pg-btn secondary" id="wfBtn">Walk-forward</button>
+        </form>
+        <datalist id="symlist"></datalist>
+      </section>
+
+      <div class="pg-tabs" role="tablist">
+        <button type="button" class="pg-tab active" data-tab="single">Single run</button>
+        <button type="button" class="pg-tab" data-tab="compare">Compare all</button>
+        <button type="button" class="pg-tab" data-tab="wf">Walk-forward</button>
+      </div>
+
+      <section class="pg-panel" id="pane-single">
+        <h2>Backtest result</h2>
+        <div id="singleBox"><div class="pg-muted" style="font-size:13px">Fill the form and press "Run backtest".</div></div>
+      </section>
+      <section class="pg-panel" id="pane-compare" style="display:none">
+        <h2>Strategy comparison</h2>
+        <div id="compareBox"><div class="pg-muted" style="font-size:13px">Press "Compare all" to rank every strategy on this symbol.</div></div>
+      </section>
+      <section class="pg-panel" id="pane-wf" style="display:none">
+        <h2>Walk-forward analysis</h2>
+        <div id="wfBox"><div class="pg-muted" style="font-size:13px">Press "Walk-forward" to test in-sample vs out-of-sample robustness.</div></div>
+      </section>
+    </main>
+    <footer class="pg-footer">Analysis tooling — not financial advice. Data delayed ~15 min.</footer>
+  </div>
+</div>
+
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<script src="/assets/api.js"></script>
+<script src="/assets/ui.js"></script>
+<script src="/assets/charts.js"></script>
+<script src="/assets/pg.js"></script>
+<script>
+'use strict';
+/* Backtest page logic */
+(function () {
+  var PG = window.PG;
+  function $(id) { return document.getElementById(id); }
+
+  function formValues() {
+    return {
+      symbol: String($('fSymbol').value || '').replace(/^EGX:/i, '').trim().toUpperCase(),
+      strategy: $('fStrategy').value,
+      period: $('fPeriod').value,
+      interval: $('fInterval').value,
+      commission_pct: Number($('fCommission').value) || 0,
+      slippage_pct: Number($('fSlippage').value) || 0,
+      initial_capital: Number($('fCapital').value) || 100000
+    };
+  }
+
+  function setTab(name) {
+    var tabs = document.querySelectorAll('.pg-tab[data-tab]');
+    for (var i = 0; i < tabs.length; i++) tabs[i].classList.toggle('active', tabs[i].getAttribute('data-tab') === name);
+    ['single', 'compare', 'wf'].forEach(function (t) {
+      var pane = $('pane-' + t);
+      if (pane) pane.style.display = t === name ? '' : 'none';
+    });
+  }
+
+  function normalizeStrategies(data) {
+    if (Array.isArray(data)) {
+      return data.map(function (s) { return typeof s === 'string' ? s : (s && (s.name || s.strategy || s.key)) || null; }).filter(Boolean);
+    }
+    if (data && typeof data === 'object') {
+      if (Array.isArray(data.strategies)) return normalizeStrategies(data.strategies);
+      var inner = PG.extractRows(data);
+      if (inner.length) return normalizeStrategies(inner);
+      return Object.keys(data);
+    }
+    return [];
+  }
+
+  async function loadStrategies() {
+    var sel = $('fStrategy');
+    try {
+      var data = await PG.api('get', '/api/backtest/strategies');
+      var list = normalizeStrategies(data);
+      sel.innerHTML = '';
+      list.forEach(function (s) { sel.appendChild(PG.mk('option', { value: s }, [s])); });
+      if (!list.length) PG.notify('No strategies returned by /api/backtest/strategies', 'error');
+    } catch (e) {
+      PG.notify('Could not load strategies: ' + (e && e.message ? e.message : e), 'error');
+    }
+  }
+
+  async function loadSymbolList() {
+    var dl = $('symlist');
+    if (!dl) return;
+    // Prefer the full ticker catalog (every EGX symbol + company name); fall
+    // back to whatever symbols the market overview happens to carry.
+    try {
+      var rows = (window.UI && UI.loadCatalog) ? await UI.loadCatalog() : [];
+      if (rows && rows.length) {
+        dl.innerHTML = '';
+        rows.forEach(function (r) {
+          dl.appendChild(PG.mk('option', { value: r.symbol, label: r.name || '' }));
+        });
+        return;
+      }
+    } catch (e) { /* fall through */ }
+    try {
+      var data = await PG.api('get', '/api/market/overview');
+      var syms = PG.collectSymbols(data);
+      dl.innerHTML = '';
+      syms.slice(0, 300).forEach(function (s) { dl.appendChild(PG.mk('option', { value: s })); });
+    } catch (e) { /* datalist is a convenience only */ }
+  }
+
+  /* ---- result rendering ---- */
+
+  function firstNum(obj, names) {
+    for (var i = 0; i < names.length; i++) {
+      var v = obj[names[i]];
+      if (v !== undefined && v !== null && isFinite(Number(v))) return Number(v);
+    }
+    return null;
+  }
+
+  function findEquity(payload) {
+    var keys = ['equity_curve', 'equity', 'equity_history', 'portfolio_value', 'balance_history'];
+    var arr = null;
+    (function walk(x, depth) {
+      if (arr || !x || depth > 3 || typeof x !== 'object') return;
+      if (!Array.isArray(x)) {
+        for (var i = 0; i < keys.length; i++) {
+          if (Array.isArray(x[keys[i]]) && x[keys[i]].length > 1) { arr = x[keys[i]]; return; }
+        }
+        for (var k in x) walk(x[k], depth + 1);
+      }
+    })(payload, 0);
+    if (!arr) return null;
+    var pts = [];
+    for (var i = 0; i < arr.length; i++) {
+      var p = arr[i], v = null, t = null;
+      if (typeof p === 'number') v = p;
+      else if (p && typeof p === 'object') {
+        v = firstNum(p, ['equity', 'value', 'balance', 'close', 'capital', 'portfolio_value']);
+        t = p.date || p.time || p.timestamp || null;
+      }
+      if (v === null || !isFinite(v)) continue;
+      pts.push({ rawTime: t, value: v });
+    }
+    if (pts.length < 2) return null;
+    // Normalize times for Lightweight Charts: date strings, unix seconds, or synthesized daily dates.
+    // The core's equity curve prepends a sentinel {date:"start"} point, so tolerate
+    // one non-date point instead of requiring every() point to carry a date.
+    var isDateStr = function (t) { return typeof t === 'string' && /^\d{4}-\d{2}-\d{2}/.test(t); };
+    var dated = pts.filter(function (p) { return isDateStr(p.rawTime); });
+    var haveDates = dated.length >= 2 && (pts.length - dated.length) <= 1;
+    var haveUnix = !haveDates && pts.every(function (p) { return isFinite(Number(p.rawTime)) && Number(p.rawTime) > 1e9; });
+    var out = [], seen = {};
+    var base = Date.now() - (pts.length - 1) * 86400000;
+    for (var j = 0; j < pts.length; j++) {
+      var time;
+      if (haveDates) {
+        if (isDateStr(pts[j].rawTime)) time = pts[j].rawTime.slice(0, 10);
+        else {
+          // Sentinel point: anchor it one day before the first real exit date.
+          var first = Date.parse(dated[0].rawTime.slice(0, 10) + 'T00:00:00Z');
+          time = new Date(first - 86400000).toISOString().slice(0, 10);
+        }
+      }
+      else if (haveUnix) { var u = Number(pts[j].rawTime); time = Math.floor(u > 1e12 ? u / 1000 : u); }
+      else time = new Date(base + j * 86400000).toISOString().slice(0, 10);
+      if (seen[time]) continue;
+      seen[time] = true;
+      out.push({ time: time, value: pts[j].value });
+    }
+    return out.length > 1 ? out : null;
+  }
+
+  function drawEquity(container, pts) {
+    container.innerHTML = '';
+    try {
+      if (!window.LightweightCharts || typeof window.LightweightCharts.createChart !== 'function') {
+        throw new Error('chart library unavailable');
+      }
+      var chart = window.LightweightCharts.createChart(container, {
+        width: container.clientWidth || 600,
+        height: 280,
+        layout: { background: { color: 'transparent' }, textColor: '#8B958F' },
+        grid: { vertLines: { color: '#26313A' }, horzLines: { color: '#26313A' } },
+        rightPriceScale: { borderColor: '#26313A' },
+        timeScale: { borderColor: '#26313A' }
+      });
+      var series = chart.addLineSeries({ color: '#2FBFA0', lineWidth: 2 });
+      series.setData(pts);
+      chart.timeScale().fitContent();
+      window.addEventListener('resize', function () {
+        try { chart.applyOptions({ width: container.clientWidth }); } catch (e) {}
+      });
+    } catch (e) {
+      PG.errBox(container, 'Equity chart unavailable: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  function findTrades(payload) {
+    var keys = ['trades', 'trade_log', 'trade_history', 'closed_trades'];
+    for (var i = 0; i < keys.length; i++) {
+      if (Array.isArray(payload[keys[i]]) && payload[keys[i]].length && typeof payload[keys[i]][0] === 'object') return payload[keys[i]];
+    }
+    for (var k in payload) {
+      var v = payload[k];
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        for (var j = 0; j < keys.length; j++) {
+          if (Array.isArray(v[keys[j]]) && v[keys[j]].length && typeof v[keys[j]][0] === 'object') return v[keys[j]];
+        }
+      }
+    }
+    return [];
+  }
+
+  function pctMetricNode(v, normalizeFraction) {
+    var n = Number(v);
+    if (v === undefined || v === null || !isFinite(n)) return document.createTextNode('—');
+    if (normalizeFraction && Math.abs(n) <= 1) n = n * 100;
+    return PG.signedNode(n, '%');
+  }
+
+  function renderSingle(payload, meta) {
+    var box = $('singleBox');
+    box.innerHTML = '';
+    if (!payload || typeof payload !== 'object') {
+      PG.errBox(box, 'Unexpected backtest response shape');
+      return;
+    }
+    box.appendChild(PG.mk('div', { class: 'pg-muted pg-asof' },
+      [meta.symbol + ' · ' + meta.strategy + ' · ' + meta.period + ' / ' + meta.interval]));
+    var assumeNote = PG.findVal(payload, ['assumptions_note']);
+    if (typeof assumeNote === 'string') {
+      box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:11.5px;margin-bottom:8px' }, [assumeNote]));
+    }
+
+    var cards = PG.mk('div', { class: 'pg-cards' });
+    var trades = findTrades(payload);
+    var ret = PG.findVal(payload, ['total_return_pct', 'total_return', 'return_pct', 'strategy_return_pct', 'net_profit_pct', 'net_return_pct']);
+    var win = PG.findVal(payload, ['win_rate', 'win_rate_pct', 'winrate']);
+    var dd = PG.findVal(payload, ['max_drawdown_pct', 'max_drawdown', 'max_dd']);
+    var sharpe = PG.findVal(payload, ['sharpe_ratio', 'sharpe']);
+    var nTrades = PG.findVal(payload, ['num_trades', 'total_trades', 'trades_count', 'n_trades']);
+    if ((nTrades === undefined || nTrades === null) && trades.length) nTrades = trades.length;
+    var bh = PG.findVal(payload, ['buy_hold_return_pct', 'buy_and_hold_return_pct', 'buy_hold_return', 'buy_and_hold_return']);
+    cards.appendChild(PG.metricCard('Return', pctMetricNode(ret, false)));
+    cards.appendChild(PG.metricCard('Win rate', pctMetricNode(win, true)));
+    cards.appendChild(PG.metricCard('Max drawdown', pctMetricNode(dd, false)));
+    cards.appendChild(PG.metricCard('Sharpe', sharpe === undefined ? '—' : PG.num(sharpe)));
+    cards.appendChild(PG.metricCard('Trades', nTrades === undefined || nTrades === null ? '—' : PG.num(nTrades, 0)));
+    cards.appendChild(PG.metricCard('Buy & hold', pctMetricNode(bh, false)));
+    box.appendChild(cards);
+
+    // Statistical honesty: below ~20 trades the headline stats are noise.
+    var n = Number(nTrades);
+    var w = Number(win);
+    if (isFinite(n) && n > 0 && n < 20) {
+      var ciTxt = '';
+      if (isFinite(w)) {
+        var p = Math.min(Math.max(w / 100, 0), 1);
+        var ci = 1.96 * Math.sqrt(p * (1 - p) / n) * 100;
+        ciTxt = ' The ' + PG.num(w, 0) + '% win rate has a 95% CI of roughly ±'
+          + PG.num(ci, 0) + ' points — statistically indistinguishable from luck.';
+      }
+      box.appendChild(PG.mk('div', {
+        class: 'pg-error', style: 'margin-top:8px;font-size:12px'
+      }, ['INSUFFICIENT SAMPLE: only ' + PG.num(n, 0) + ' trades.' + ciTxt
+        + ' Do not act on these numbers.']));
+    }
+
+    var eq = findEquity(payload);
+    box.appendChild(PG.mk('div', { class: 'pg-subhead' }, ['Equity curve']));
+    var chartDiv = PG.mk('div', { id: 'equityChart' });
+    box.appendChild(chartDiv);
+    if (eq) drawEquity(chartDiv, eq);
+    else PG.errBox(chartDiv, 'No equity-curve series found in the backtest response.');
+
+    box.appendChild(PG.mk('div', { class: 'pg-subhead' }, ['Trade log']));
+    if (trades.length) box.appendChild(PG.table(trades, { maxCols: 11 }));
+    else box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:13px' }, ['No trade log in the response.']));
+
+    box.appendChild(PG.detailsBlock('All returned fields', payload));
+  }
+
+  function renderCompare(payload, meta) {
+    var box = $('compareBox');
+    box.innerHTML = '';
+    var rows = PG.extractRows(payload);
+    if (!rows.length && payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      // maybe {strategy_name: {metrics...}} shape
+      var entries = [];
+      Object.keys(payload).forEach(function (k) {
+        var v = payload[k];
+        if (v && typeof v === 'object' && !Array.isArray(v)) {
+          var row = { strategy: k };
+          Object.keys(v).forEach(function (kk) { if (typeof v[kk] !== 'object') row[kk] = v[kk]; });
+          entries.push(row);
+        }
+      });
+      if (entries.length > 1) rows = entries;
+    }
+    box.appendChild(PG.mk('div', { class: 'pg-muted pg-asof' },
+      [meta.symbol + ' · ' + meta.period + ' / ' + meta.interval + ' · ' + rows.length + ' strategies']));
+    // Multiple-comparison honesty: the max of N noisy backtests is positive
+    // even when every true edge is zero.
+    box.appendChild(PG.mk('div', { class: 'pg-error', style: 'margin-bottom:8px;font-size:12px' },
+      ['Best-of-' + (rows.length || 9) + ' on ONE price history — the "winner" is '
+       + 'systematically overestimated and should be expected to regress. Strategies '
+       + 'with few trades are ranked on noise. Cross-check any winner with Walk-forward '
+       + 'before trusting it.']));
+    if (rows.length) box.appendChild(PG.table(rows, { maxCols: 12 }));
+    else box.appendChild(PG.renderAny(PG.slim(payload), 0));
+    box.appendChild(PG.detailsBlock('Raw response', payload));
+  }
+
+  function renderWalkForward(payload, meta) {
+    var box = $('wfBox');
+    box.innerHTML = '';
+    box.appendChild(PG.mk('div', { class: 'pg-muted pg-asof' },
+      [meta.symbol + ' · ' + meta.strategy + ' · ' + meta.period + ' / ' + meta.interval]));
+    // The engine's own honesty caveat used to be buried in the collapsed raw
+    // JSON — surface it where the verdict is read.
+    var caveat = PG.findVal(payload, ['caveat']);
+    if (typeof caveat === 'string') {
+      box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:12px;margin-bottom:8px' },
+        ['Engine caveat: ' + caveat]));
+    }
+    var insufFolds = PG.findVal(payload, ['insufficient_data_folds']);
+    if (Number(insufFolds) > 0) {
+      box.appendChild(PG.mk('div', { class: 'pg-error', style: 'font-size:12px;margin-bottom:8px' },
+        [PG.num(insufFolds, 0) + ' fold(s) had too little data to trade — the robustness '
+         + 'score rests on fewer folds than configured.']));
+    }
+    var inS = PG.findVal(payload, ['in_sample', 'insample', 'in_sample_results', 'train']);
+    var outS = PG.findVal(payload, ['out_of_sample', 'outsample', 'out_of_sample_results', 'test']);
+    if (inS !== undefined || outS !== undefined) {
+      var grid = PG.mk('div', { class: 'pg-wf-grid' });
+      var pIn = PG.mk('div', { class: 'pg-card' }, [PG.mk('div', { class: 'pg-card-label' }, ['In-sample'])]);
+      pIn.appendChild(PG.renderAny(PG.slim(inS), 1));
+      var pOut = PG.mk('div', { class: 'pg-card' }, [PG.mk('div', { class: 'pg-card-label' }, ['Out-of-sample'])]);
+      pOut.appendChild(PG.renderAny(PG.slim(outS), 1));
+      grid.appendChild(pIn);
+      grid.appendChild(pOut);
+      box.appendChild(grid);
+    }
+    var windows = PG.findVal(payload, ['windows', 'folds', 'segments', 'splits']);
+    if (Array.isArray(windows) && windows.length && typeof windows[0] === 'object') {
+      box.appendChild(PG.mk('div', { class: 'pg-subhead' }, ['Windows']));
+      box.appendChild(PG.table(windows, { maxCols: 12 }));
+    }
+    if (inS === undefined && outS === undefined && !Array.isArray(windows)) {
+      box.appendChild(PG.renderAny(PG.slim(payload), 0));
+    }
+    box.appendChild(PG.detailsBlock('Raw response', payload));
+  }
+
+  /* ---- actions ---- */
+
+  function validSymbol(f) {
+    if (!f.symbol) { PG.notify('Enter a symbol first', 'error'); return false; }
+    return true;
+  }
+
+  async function runSingle(ev) {
+    if (ev) ev.preventDefault();
+    var f = formValues();
+    if (!validSymbol(f)) return;
+    if (!f.strategy) { PG.notify('Pick a strategy', 'error'); return; }
+    setTab('single');
+    var box = $('singleBox'), btn = $('runBtn');
+    btn.disabled = true;
+    PG.loading(box, 'Backtesting ' + f.symbol + ' with "' + f.strategy + '"…');
+    try {
+      var payload = await PG.api('post', '/api/backtest', f);
+      renderSingle(payload, f);
+      PG.notify('Backtest finished: ' + f.symbol + ' / ' + f.strategy, 'success');
+    } catch (e) {
+      PG.errBox(box, 'Backtest failed: ' + (e && e.message ? e.message : e));
+      PG.notify('Backtest failed: ' + (e && e.message ? e.message : e), 'error');
+    } finally { btn.disabled = false; }
+  }
+
+  async function runCompare() {
+    var f = formValues();
+    if (!validSymbol(f)) return;
+    setTab('compare');
+    var box = $('compareBox'), btn = $('compareBtn');
+    btn.disabled = true;
+    PG.loading(box, 'Comparing all strategies on ' + f.symbol + ' — this can take a while…');
+    try {
+      var payload = await PG.api('post', '/api/backtest/compare', {
+        symbol: f.symbol, period: f.period, interval: f.interval,
+        commission_pct: f.commission_pct, slippage_pct: f.slippage_pct,
+        initial_capital: f.initial_capital,
+      });
+      renderCompare(payload, f);
+      PG.notify('Strategy comparison finished for ' + f.symbol, 'success');
+    } catch (e) {
+      PG.errBox(box, 'Comparison failed: ' + (e && e.message ? e.message : e));
+      PG.notify('Comparison failed: ' + (e && e.message ? e.message : e), 'error');
+    } finally { btn.disabled = false; }
+  }
+
+  async function runWalkForward() {
+    var f = formValues();
+    if (!validSymbol(f)) return;
+    if (!f.strategy) { PG.notify('Pick a strategy', 'error'); return; }
+    setTab('wf');
+    var box = $('wfBox'), btn = $('wfBtn');
+    btn.disabled = true;
+    PG.loading(box, 'Walk-forward testing ' + f.symbol + ' / ' + f.strategy + '…');
+    try {
+      var payload = await PG.api('post', '/api/backtest/walkforward', {
+        symbol: f.symbol, strategy: f.strategy,
+        period: f.period === '1y' ? '2y' : f.period, interval: f.interval,
+        commission_pct: f.commission_pct, slippage_pct: f.slippage_pct,
+        initial_capital: f.initial_capital,
+      });
+      renderWalkForward(payload, f);
+      PG.notify('Walk-forward finished for ' + f.symbol, 'success');
+    } catch (e) {
+      PG.errBox(box, 'Walk-forward failed: ' + (e && e.message ? e.message : e));
+      PG.notify('Walk-forward failed: ' + (e && e.message ? e.message : e), 'error');
+    } finally { btn.disabled = false; }
+  }
+
+  function init() {
+    PG.boot('backtest');
+    $('btForm').addEventListener('submit', runSingle);
+    $('compareBtn').addEventListener('click', runCompare);
+    $('wfBtn').addEventListener('click', runWalkForward);
+    var tabs = document.querySelectorAll('.pg-tab[data-tab]');
+    for (var i = 0; i < tabs.length; i++) {
+      (function (t) { t.addEventListener('click', function () { setTab(t.getAttribute('data-tab')); }); })(tabs[i]);
+    }
+    var q = new URLSearchParams(window.location.search);
+    if (q.get('symbol')) $('fSymbol').value = q.get('symbol').replace(/^EGX:/i, '').toUpperCase();
+    loadStrategies();
+    loadSymbolList();
+  }
+
+  document.addEventListener('DOMContentLoaded', init);
+})();
+</script>
+</body>
+</html>

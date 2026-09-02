@@ -1,0 +1,22 @@
+# EGX Decision Engine — Python dependencies
+#
+# Versions are PINNED to what this app was built and verified against. The
+# code carries compatibility shims for SDK drift (see app/services/briefs.py),
+# so an unpinned upgrade can silently change behaviour rather than fail loudly.
+# To upgrade deliberately: bump a pin, run `pytest tests -q`, exercise the UI.
+#
+# The analytics core is installed separately as an editable install:
+#   pip install -e D:\MyApps\tradingview-mcp
+# (moved out of OneDrive on 2026-09-01 — sync could relocate the files and
+# break every import at boot; /api/health reports where the package actually
+# resolved from under core_library.path).
+
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+apscheduler==3.11.3
+jinja2==3.1.6
+anthropic==1.1.0
+tzdata==2026.3
+python-dotenv==1.2.3
+httpx==0.28.1
+pytest==9.1.1

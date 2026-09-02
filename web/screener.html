@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Screener — EGX Decision Engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+<link rel="stylesheet" href="/assets/pg.css">
+</head>
+<body>
+<div class="pg-layout">
+  <aside id="sidebar"></aside>
+  <div class="pg-main">
+    <header id="topbar"></header>
+    <main class="pg-content">
+      <div class="pg-tabs" role="tablist">
+        <button type="button" class="pg-tab active" id="tabScanner">Scanner</button>
+        <button type="button" class="pg-tab" id="tabCandidates">Candidates</button>
+      </div>
+
+      <section id="scannerSection" class="pg-panel">
+        <h2>Run a scanner</h2>
+        <div id="scannerMeta" class="pg-muted pg-asof"></div>
+        <form class="pg-form" id="scannerForm">
+          <label class="pg-field">Scanner
+            <select id="scannerPick"></select>
+          </label>
+          <span id="paramFields" style="display:contents"></span>
+          <button type="submit" class="pg-btn" id="runBtn">Run scanner</button>
+        </form>
+      </section>
+
+      <section id="resultsSection" class="pg-panel">
+        <h2>Results</h2>
+        <div id="resultsBox"><div class="pg-muted" style="font-size:13px">Pick a scanner and press Run. Click a column header to sort; click a row to open the stock page.</div></div>
+      </section>
+
+      <section id="candidatesSection" class="pg-panel" style="display:none">
+        <h2>Candidates — merged multi-scanner ranking</h2>
+        <div id="candidatesBox"></div>
+      </section>
+    </main>
+    <footer class="pg-footer">Analysis tooling — not financial advice. Data delayed ~15 min.</footer>
+  </div>
+</div>
+
+<script src="/assets/api.js"></script>
+<script src="/assets/ui.js"></script>
+<script src="/assets/pg.js"></script>
+<script>
+'use strict';
+/* Screener page logic */
+(function () {
+  var PG = window.PG;
+  var SCANNERS = {};
+  var candidatesLoaded = false;
+
+  function $(id) { return document.getElementById(id); }
+
+  function normalizeScanners(data) {
+    var out = {};
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      if (data.scanners && typeof data.scanners === 'object' && !Array.isArray(data.scanners)) data = data.scanners;
+      Object.keys(data).forEach(function (k) {
+        var v = data[k];
+        if (v && typeof v === 'object') {
+          out[k] = {
+            label: typeof v.label === 'string' ? v.label : k,
+            description: typeof v.description === 'string' ? v.description : '',
+            params: (v.params && typeof v.params === 'object' && !Array.isArray(v.params)) ? v.params : {}
+          };
+        }
+      });
+    } else if (Array.isArray(data)) {
+      data.forEach(function (item) {
+        if (typeof item === 'string') out[item] = { label: item, description: '', params: {} };
+        else if (item && typeof item === 'object' && item.key) {
+          out[item.key] = { label: item.label || item.key, description: item.description || '', params: item.params || {} };
+        }
+      });
+    }
+    return out;
+  }
+
+  function buildPicker() {
+    var pick = $('scannerPick');
+    pick.innerHTML = '';
+    Object.keys(SCANNERS).forEach(function (k) {
+      pick.appendChild(PG.mk('option', { value: k }, [SCANNERS[k].label + ' (' + k + ')']));
+    });
+    pick.addEventListener('change', function () { buildParamForm(pick.value); });
+    if (pick.options.length) buildParamForm(pick.value);
+  }
+
+  function buildParamForm(key) {
+    var box = $('paramFields');
+    box.innerHTML = '';
+    var sc = SCANNERS[key];
+    $('scannerMeta').textContent = sc && sc.description ? sc.description : '';
+    if (!sc) return;
+    Object.keys(sc.params).forEach(function (name) {
+      var def = sc.params[name], input;
+      if (typeof def === 'boolean') {
+        input = PG.mk('input', { type: 'checkbox' });
+        input.checked = def;
+      } else if (typeof def === 'number') {
+        input = PG.mk('input', { type: 'number', step: 'any' });
+        input.value = String(def);
+      } else if (def !== null && typeof def === 'object') {
+        input = PG.mk('input', { type: 'text' });
+        try { input.value = JSON.stringify(def); } catch (e) { input.value = ''; }
+      } else {
+        input = PG.mk('input', { type: 'text' });
+        input.value = def === null || def === undefined ? '' : String(def);
+      }
+      input.setAttribute('data-param', name);
+      input.setAttribute('data-kind', typeof def);
+      var label = PG.mk('label', { class: 'pg-field' }, [name.replace(/_/g, ' ')]);
+      label.appendChild(input);
+      box.appendChild(label);
+    });
+  }
+
+  async function runScanner(ev) {
+    if (ev) ev.preventDefault();
+    var pick = $('scannerPick'), key = pick.value;
+    if (!key) { PG.notify('No scanner selected', 'error'); return; }
+    var label = SCANNERS[key] ? SCANNERS[key].label : key;
+    var qs = new URLSearchParams();
+    var inputs = $('paramFields').querySelectorAll('[data-param]');
+    for (var i = 0; i < inputs.length; i++) {
+      var inp = inputs[i];
+      var v = inp.type === 'checkbox' ? (inp.checked ? 'true' : 'false') : String(inp.value).trim();
+      if (v !== '') qs.set(inp.getAttribute('data-param'), v);
+    }
+    var box = $('resultsBox');
+    var btn = $('runBtn');
+    btn.disabled = true;
+    PG.loading(box, 'Running "' + label + '"…');
+    try {
+      var q = qs.toString();
+      var payload = await PG.api('get', '/api/screener/run/' + encodeURIComponent(key) + (q ? '?' + q : ''));
+      var rows = PG.extractRows(payload).map(function (r) {
+        return (r !== null && typeof r === 'object') ? r : { symbol: String(r) };
+      });
+      box.innerHTML = '';
+      box.appendChild(PG.mk('div', { class: 'pg-muted pg-asof' },
+        ['Scanner: ' + label + ' · rows: ' + rows.length + (payload && payload.as_of ? ' · as of ' + payload.as_of : '')]));
+      box.appendChild(PG.table(rows, { onRow: PG.openStock, exclude: ['payload_json'] }));
+      if (!rows.length && payload && typeof payload === 'object' && !Array.isArray(payload)) {
+        box.appendChild(PG.detailsBlock('Raw response', payload));
+      }
+      PG.notify('Scanner "' + label + '" returned ' + rows.length + ' row' + (rows.length === 1 ? '' : 's'), 'success');
+    } catch (e) {
+      PG.errBox(box, 'Scanner failed: ' + (e && e.message ? e.message : e));
+      PG.notify('Scanner failed: ' + (e && e.message ? e.message : e), 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function loadCandidates(force) {
+    if (candidatesLoaded && !force) return;
+    var box = $('candidatesBox');
+    PG.loading(box, 'Merging scanners — this can take a minute…');
+    try {
+      var payload = await PG.api('get', '/api/screener/candidates');
+      var rows = PG.extractRows(payload).map(function (r) {
+        return (r !== null && typeof r === 'object') ? r : { symbol: String(r) };
+      });
+      box.innerHTML = '';
+      var head = PG.mk('div', { class: 'pg-form', style: 'margin-bottom:10px' });
+      head.appendChild(PG.mk('div', { class: 'pg-muted pg-asof', style: 'margin:0;flex:1' },
+        [rows.length + ' candidate' + (rows.length === 1 ? '' : 's') + (payload && payload.as_of ? ' · as of ' + payload.as_of : '')]));
+      var refresh = PG.mk('button', { type: 'button', class: 'pg-btn secondary' }, ['Refresh']);
+      refresh.addEventListener('click', function () { candidatesLoaded = false; loadCandidates(true); });
+      head.appendChild(refresh);
+      box.appendChild(head);
+      box.appendChild(PG.table(rows, {
+        onRow: PG.openStock,
+        renderers: {
+          scanners: function (v) {
+            var wrap = PG.mk('span');
+            var list = Array.isArray(v) ? v : (v ? [v] : []);
+            if (!list.length) return PG.mk('span', { class: 'pg-muted' }, ['—']);
+            list.forEach(function (s) { wrap.appendChild(PG.mk('span', { class: 'pg-badge' }, [String(s)])); });
+            return wrap;
+          }
+        }
+      }));
+      candidatesLoaded = true;
+    } catch (e) {
+      PG.errBox(box, 'Candidates failed: ' + (e && e.message ? e.message : e));
+      PG.notify('Candidates failed: ' + (e && e.message ? e.message : e), 'error');
+    }
+  }
+
+  function setMode(mode) {
+    var scanner = mode === 'scanner';
+    $('tabScanner').classList.toggle('active', scanner);
+    $('tabCandidates').classList.toggle('active', !scanner);
+    $('scannerSection').style.display = scanner ? '' : 'none';
+    $('resultsSection').style.display = scanner ? '' : 'none';
+    $('candidatesSection').style.display = scanner ? 'none' : '';
+    if (!scanner) loadCandidates(false);
+  }
+
+  async function init() {
+    PG.boot('screener');
+    $('tabScanner').addEventListener('click', function () { setMode('scanner'); });
+    $('tabCandidates').addEventListener('click', function () { setMode('candidates'); });
+    $('scannerForm').addEventListener('submit', runScanner);
+    try {
+      PG.loading($('scannerMeta'), 'Loading scanners…');
+      var data = await PG.api('get', '/api/screener/list');
+      SCANNERS = normalizeScanners(data);
+      $('scannerMeta').textContent = '';
+      if (!Object.keys(SCANNERS).length) {
+        PG.errBox($('scannerMeta'), 'No scanners returned by /api/screener/list');
+        return;
+      }
+      buildPicker();
+    } catch (e) {
+      PG.errBox($('scannerMeta'), 'Could not load scanner list: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', init);
+})();
+</script>
+</body>
+</html>
