@@ -75,12 +75,15 @@
           </div>
 
           <div class="card">
-            <div class="card-title"><span>Score</span></div>
+            <div class="card-title"><span>Score <span class="muted tf-tag" id="score-tf"></span></span>
+              <span class="tf-toggle" id="tf-toggle" title="Daily is the decision timeframe. Weekly answers a different question: is the larger trend intact? Only Score and Trade plan switch; the other cards stay daily.">
+                <button type="button" class="tf-btn active" data-tf="1D">1D</button><button type="button" class="tf-btn" data-tf="1W">1W</button>
+              </span></div>
             <div id="score-box"></div>
           </div>
 
           <div class="card">
-            <div class="card-title"><span>Trade plan</span></div>
+            <div class="card-title"><span>Trade plan <span class="muted tf-tag" id="plan-tf"></span></span></div>
             <div id="plan-box"></div>
           </div>
 
@@ -169,6 +172,11 @@
       }
     }).catch(function () { /* keep the field's fallback */ });
 
+    document.getElementById("tf-toggle").addEventListener("click", function (ev) {
+      var btn = ev.target.closest("[data-tf]");
+      if (!btn || btn.classList.contains("active")) return;
+      switchTimeframe(btn.getAttribute("data-tf"));
+    });
     document.getElementById("star-btn").addEventListener("click", toggleWatchlist);
     document.getElementById("ps-btn").addEventListener("click", sizePosition);
     document.getElementById("btn-thesis").addEventListener("click", generateThesis);
@@ -176,6 +184,39 @@
   });
 
   /* ================= detail: header, score, plan ================= */
+
+  // Score and Trade plan can be viewed on the weekly timeframe. Everything else
+  // — header price, checklist, levels, patterns, your position — stays daily:
+  // the weekly view is context, the daily view is the decision.
+  function switchTimeframe(tf) {
+    state.timeframe = tf;
+    var btns = document.querySelectorAll("#tf-toggle .tf-btn");
+    for (var i = 0; i < btns.length; i++) btns[i].classList.toggle("active", btns[i].getAttribute("data-tf") === tf);
+    var tag = tf === "1W" ? "· weekly" : "";
+    document.getElementById("score-tf").textContent = tag;
+    document.getElementById("plan-tf").textContent = tag;
+    var scoreBox = document.getElementById("score-box");
+    var planBox = document.getElementById("plan-box");
+    U.clear(scoreBox).appendChild(U.skeleton(4));
+    U.clear(planBox).appendChild(U.skeleton(4));
+    var url = "/api/stocks/" + encodeURIComponent(SYMBOL) + (tf === "1W" ? "?timeframe=1W" : "");
+    API.get(url).then(function (detail) {
+      if (state.timeframe !== tf) return; // user switched again while loading
+      if (tf === "1D") state.detail = detail || {};
+      state.tfDetail = detail || {};
+      renderScore(scoreBox, state.tfDetail);
+      renderPlan(planBox, state.tfDetail);
+      if (tf === "1W") {
+        planBox.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:8px", text:
+          "Weekly plan: entry, stop and targets are in weekly terms — wider, slower, fewer signals. The stop below "
+          + "belongs under a weekly level; size the position on that stop, not the daily one. Switch back to 1D for today's decision." }));
+      }
+      applyPlanOverlays();
+    }).catch(function (e) {
+      U.clear(scoreBox).appendChild(U.errorBox("Analysis (" + tf + "): " + e.message));
+      U.clear(planBox).appendChild(U.errorBox("Trade plan (" + tf + "): " + e.message));
+    });
+  }
 
   function loadDetail() {
     var scoreBox = document.getElementById("score-box");
@@ -313,6 +354,7 @@
         rows.slice(0, 4).forEach(function (r) {
           var line = el("div", { class: "lv-row" });
           line.appendChild(el("span", { class: "lv-price " + cls, text: fmtNum(r.level) }));
+          if (r.weekly) line.appendChild(el("span", { class: "badge neutral lv-w", text: "W", title: "Also a weekly zone (tested " + (r.weekly_touches || "?") + "x on the weekly chart) — the larger trend respects this level" }));
           line.appendChild(el("span", { class: "muted lv-meta", text: (r.distance_pct > 0 ? "+" : "") + fmtNum(r.distance_pct) + "% · " + r.source + (r.touches ? " · tested " + r.touches + "x" : "") + (r.last_touch ? " · " + r.last_touch : "") }));
           c.appendChild(line);
         });
@@ -321,7 +363,28 @@
       grid.appendChild(col("Resistance above", lv.resistances || [], "down"));
       grid.appendChild(col("Support below", lv.supports || [], "up"));
       box.appendChild(grid);
-      box.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:8px", text: "Tested zones (2+ touches) are drawn on the chart. " + (lv.basis || "") }));
+      // Weekly zones: the levels the larger trend respects. Daily candles
+      // resampled to weeks; only zones tested twice or more on the weekly chart.
+      var wr = lv.weekly_resistances || [], ws = lv.weekly_supports || [];
+      if (wr.length || ws.length) {
+        var wgrid = el("div", { class: "lv-grid", style: "margin-top:8px" });
+        var wcol = function (title, rows, cls) {
+          var c = el("div");
+          c.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px", text: title }));
+          if (!rows.length) c.appendChild(el("div", { class: "muted", text: "none" }));
+          rows.slice(0, 3).forEach(function (r) {
+            var line = el("div", { class: "lv-row" });
+            line.appendChild(el("span", { class: "lv-price " + cls, text: fmtNum(r.level) }));
+            line.appendChild(el("span", { class: "muted lv-meta", text: (r.distance_pct > 0 ? "+" : "") + fmtNum(r.distance_pct) + "% · tested " + r.touches + " weeks" + (r.last_touch ? " · " + r.last_touch : "") }));
+            c.appendChild(line);
+          });
+          return c;
+        };
+        wgrid.appendChild(wcol("Weekly resistance", wr, "down"));
+        wgrid.appendChild(wcol("Weekly support", ws, "up"));
+        box.appendChild(wgrid);
+      }
+      box.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:8px", text: "Tested zones (2+ touches) are drawn on the chart; W marks a daily level that is also a weekly zone. " + (lv.basis || "") }));
       applyPlanOverlays();
     }).catch(function (e) {
       U.clear(box).appendChild(el("div", { class: "muted", text: "Levels unavailable: " + e.message }));
@@ -329,6 +392,15 @@
   }
 
   /* ---------- chart patterns ---------- */
+
+  // "confirmed" is a fact about the PAST — this pattern's own trigger has already
+  // been broken — not a forecast. Two confirmed patterns can point opposite ways
+  // because they describe different events on different days; the target is
+  // where THIS pattern's measured move lands if it plays out.
+  var STATUS_TIP = {
+    confirmed: "This pattern's trigger has already been broken (a past fact, dated under Break). Not a forecast: the target is where this pattern's measured move lands IF it plays out. Bullish and bearish patterns can both be confirmed — they describe different events.",
+    forming: "The shape is complete but its trigger has not been broken yet. Nothing has happened; the trigger price is what to watch."
+  };
 
   function loadPatterns() {
     var box = document.getElementById("pat-box");
@@ -394,9 +466,10 @@
         nNeu ? nNeu + " neutral" : null].filter(Boolean).join(" · ") + (rows.length > events.length ? " · " + rows.length + " rows" : "") }));
       var dl0 = p && p.decisive_level;
       if (dl0 && dl0.level !== null && dl0.level !== undefined) {
-        var pct = dl0.pct_away;
+        var pct = dl0.pct_away, below = pct < 0;
         box.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px", text:
-          "Decisive level " + fmtNum(dl0.level) + " (" + (pct > 0 ? "+" : "") + fmtNum(pct) + "% away) — " + (dl0.labels || []).join(", ") + ". A close through it flips this line." }));
+          "Decisive level " + fmtNum(dl0.level) + " — " + fmtNum(Math.abs(pct)) + "% " + (below ? "below" : "above") + " price · " + (dl0.labels || []).join(", ")
+          + ". A daily close " + (below ? "back under" : "above") + " it flips this line." }));
       }
       var MAX_VISIBLE = 6;
       var list = el("div");
@@ -432,7 +505,7 @@
         if (hz) head.appendChild(el("span", { class: "pat-hz", text: hz, title: "How long this has been building (since " + (r.start_date || "?") + ")" }));
         head.appendChild(el("strong", { text: r.label + (r.broke === "up" ? " ↑ broke up" : (r.broke === "down" ? " ↓ broke down" : "")) }));
         head.appendChild(el("span", { class: "badge " + (r.direction === "bullish" ? "buy" : (r.direction === "bearish" ? "sell" : "neutral")), text: r.direction }));
-        head.appendChild(el("span", { class: "badge " + (r.status === "confirmed" ? "up" : "neutral"), text: r.status }));
+        head.appendChild(el("span", { class: "badge " + (r.status === "confirmed" ? "up" : "neutral"), text: r.status, title: STATUS_TIP[r.status] || "" }));
         if (ev.members.length) head.appendChild(el("span", { class: "muted pat-also", text: "also: " + ev.members.map(function (m) { return m.label; }).join(", ") }));
         head.appendChild(el("span", { class: "muted pat-gist", text: gistOf(r) }));
         item.appendChild(head);
@@ -444,7 +517,7 @@
             var mi = el("details", { class: "pat-item pat-sub" });
             var mh = el("summary", { class: "pat-summary" });
             mh.appendChild(el("strong", { text: m.label }));
-            mh.appendChild(el("span", { class: "badge " + (m.status === "confirmed" ? "up" : "neutral"), text: m.status }));
+            mh.appendChild(el("span", { class: "badge " + (m.status === "confirmed" ? "up" : "neutral"), text: m.status, title: STATUS_TIP[m.status] || "" }));
             mh.appendChild(el("span", { class: "muted pat-gist", text: gistOf(m) }));
             mi.appendChild(mh);
             mi.appendChild(rowBody(m));
@@ -807,9 +880,10 @@
       if (s !== null) overlays.push({ price: s, title: "your stop", color: "#E5534B", dashed: true });
       if (sug !== null) overlays.push({ price: sug, title: "suggested stop", color: "#D2A44C", dashed: true });
     });
-    ((state.levels && state.levels.key_levels) || []).slice(0, 4).forEach(function (l) {
+    ((state.levels && state.levels.key_levels) || []).slice(0, 6).forEach(function (l) {
       var isSup = l.level < (state.levels.price || 0);
-      overlays.push({ price: l.level, title: (isSup ? "support" : "resistance") + " x" + l.touches, color: isSup ? "#3F8F6B" : "#9B4F4A", dashed: true });
+      var weekly = l.timeframe === "1W";
+      overlays.push({ price: l.level, title: (weekly ? "weekly " : "") + (isSup ? "support" : "resistance") + " x" + l.touches + (l.weekly && !weekly ? " W" : ""), color: isSup ? "#3F8F6B" : "#9B4F4A", dashed: true });
     });
     var SHAPE_CATS = { reversal: 1, triangle: 1, wedge: 1, channel: 1, continuation: 1 };
     (state.patterns || []).filter(function (r) { return SHAPE_CATS[r.category] && r.neckline !== null; }).slice(0, 2).forEach(function (r) {

@@ -245,6 +245,14 @@ class TestPriceAction:
         assert "false_breakout" in found and "bull_trap" in found
         assert found["bull_trap"]["direction"] == "bearish"
 
+    def test_trap_is_dropped_once_the_level_is_reclaimed(self) -> None:
+        rows = _flat(50)
+        rows.append((100.5, 103.2, 100.4, 103.0))           # break up over the range high
+        rows.append((102.8, 102.9, 99.6, 99.9))             # back inside → bull trap
+        rows.append((99.9, 101.6, 99.7, 101.4))             # closes back ABOVE the level: trap released
+        found = self._detect(rows)
+        assert "bull_trap" not in found and "false_breakout" not in found, list(found)
+
     def test_spring(self) -> None:
         rows = _flat(50)
         low = min(r[2] for r in rows[-20:])

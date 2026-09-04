@@ -197,6 +197,17 @@ CATALOG: dict[str, dict[str, Any]] = {p["key"]: p for p in [
        "First close through the last swing AGAINST the trend — the structure has changed."),
     _p("break_of_structure", "Break of Structure (BOS)", "price_action", "neutral", "continuation", "medium", "common",
        "Close through the last swing WITH the trend — the trend re-asserts itself."),
+    # ── Weekly structure (daily candles resampled to weeks; the larger trend) ──
+    _p("weekly_higher_high_higher_low", "Weekly Higher High / Higher Low", "price_action", "bullish", "structure", "medium", "common",
+       "On the weekly chart each swing high and low is above the last — the larger trend is up. "
+       "Feeds the checklist's Trend pillar, not its price-action pillar."),
+    _p("weekly_lower_high_lower_low", "Weekly Lower High / Lower Low", "price_action", "bearish", "structure", "medium", "common",
+       "On the weekly chart each swing high and low is below the last — the larger trend is down. "
+       "Daily buy signals against it are counter-trend."),
+    _p("weekly_break_of_structure", "Weekly Break of Structure", "price_action", "neutral", "continuation", "medium", "uncommon",
+       "A weekly close through the last weekly swing WITH the trend — the larger trend re-asserts itself."),
+    _p("weekly_change_of_character", "Weekly Change of Character", "price_action", "neutral", "reversal", "medium", "rare",
+       "A weekly close through the last weekly swing AGAINST the trend — the larger trend may be turning."),
 ]}
 
 

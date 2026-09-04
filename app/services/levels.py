@@ -130,8 +130,29 @@ def compute(symbol: str, candles: Optional[list[dict]] = None) -> dict:
         meaningful = lambda l: l["source"] != "round number"  # noqa: E731
         near_s = next((l for l in supports if meaningful(l)), supports[0] if supports else None)
         near_r = next((l for l in resistances if meaningful(l)), resistances[0] if resistances else None)
-        # Strongest tested zones (swing clusters with >= 2 touches) for the chart.
+        # Weekly zones (daily candles resampled to weeks). Kept as their own list
+        # so the daily ranking is untouched; a daily level sitting on a weekly
+        # zone is flagged ``weekly`` — that is the level the larger trend respects.
+        from app.services import weekly as _weekly
+
+        wz = _weekly.zones(candles)
+        for z in wz:
+            z["distance_pct"] = round((z["level"] / price - 1.0) * 100.0, 2)
+            z["distance_atr"] = round((z["level"] - price) / atr, 2)
+        for lv in merged:
+            hit = next((z for z in wz if abs(z["level"] - lv["level"]) <= 0.5 * atr), None)
+            lv["weekly"] = bool(hit)
+            if hit:
+                lv["weekly_touches"] = hit["touches"]
+        weekly_supports = sorted([z for z in wz if z["level"] < price], key=lambda z: -z["level"])
+        weekly_resistances = sorted([z for z in wz if z["level"] >= price], key=lambda z: z["level"])
+        # Strongest tested zones (swing clusters with >= 2 touches) for the chart —
+        # weekly zones that no daily level already covers are added.
         key_levels = sorted([l for l in merged if l.get("touches", 0) >= 2], key=lambda l: -l["strength"])[:6]
+        for z in wz:
+            if not any(abs(z["level"] - k["level"]) <= 0.5 * atr for k in key_levels):
+                key_levels.append(z)
+        key_levels = key_levels[:8]
 
         if near_r and (near_r["level"] - price) <= AT_LEVEL_ATR * atr and near_r.get("touches", 0) >= 2:
             where, note = "at resistance", (f"Price is within {near_r['distance_atr']:+.1f} ATR of a resistance "
@@ -151,6 +172,7 @@ def compute(symbol: str, candles: Optional[list[dict]] = None) -> dict:
         return {
             "symbol": sym, "price": round(price, 4), "atr14": round(atr, 4),
             "supports": supports[:6], "resistances": resistances[:6], "key_levels": key_levels,
+            "weekly_supports": weekly_supports[:3], "weekly_resistances": weekly_resistances[:3],
             "nearest_support": near_s, "nearest_resistance": near_r,
             "room_up_pct": round((near_r["level"] / price - 1) * 100, 2) if near_r else None,
             "room_down_pct": round((1 - near_s["level"] / price) * 100, 2) if near_s else None,
@@ -158,7 +180,8 @@ def compute(symbol: str, candles: Optional[list[dict]] = None) -> dict:
             "as_of": str(window[-1]["time"]),
             "basis": ("Zones = clusters of swing highs/lows (window 3) within 0.75 ATR over the last year, "
                       "strength = touches + recency + volume at the touches; plus 52-week extremes, round "
-                      "numbers near price, SMA50/SMA200."),
+                      "numbers near price, SMA50/SMA200. Weekly zones = the same on daily candles resampled "
+                      "to weeks (window 2); a daily level marked W sits on one."),
         }
     except Exception as exc:  # noqa: BLE001
         logger.exception("levels.compute failed")

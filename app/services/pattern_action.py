@@ -64,6 +64,13 @@ def detect(candles: list[dict], atr: float) -> list[dict]:
             consumed.update(range(j, fail_idx + 1))
         vr = vol_ratio(candles, j)
         if fail_idx is not None:
+            # A trap is over once price closes back through the level it failed
+            # at — the trapped side has been released. Showing "bull trap,
+            # target = range low" with price already back above the line would
+            # be a stale fact dressed as a live signal.
+            reclaimed = any((bullish and c > level) or (not bullish and c < level) for c in closes[fail_idx + 1:])
+            if reclaimed:
+                continue
             if n - 1 - fail_idx <= RECENT + 2:
                 trap = "bull_trap" if bullish else "bear_trap"
                 out.append(make_row("false_breakout", "bearish" if bullish else "bullish", "confirmed", candles,
@@ -149,48 +156,71 @@ def detect(candles: list[dict], atr: float) -> list[dict]:
                                 extra={"down_sessions": down, "sma20": round(s20, 4), "sma50": round(s50, 4)}))
 
     # ── swing structure, BOS, CHoCH ───────────────────────────────────────
-    start = max(0, n - 80)
-    sh, sl = swing_points(candles[start:], k=3)
+    out.extend(structure_rows(candles, atr))
+    return out
+
+
+def structure_rows(candles: list[dict], atr: float, *, k: int = 3, lookback: int = 80,
+                   recent: int = RECENT, prefix: str = "", label_suffix: str = "",
+                   timeframe: str = "1D") -> list[dict]:
+    """Swing structure (HH/HL or LH/LL), break of structure and change of
+    character on the last ``lookback`` bars. Shared by the daily detector and
+    the weekly context (``prefix="weekly_"``, ``timeframe="1W"``)."""
+    n = len(candles)
+    closes = [float(c["close"]) for c in candles]
+    out: list[dict] = []
+    start = max(0, n - lookback)
+    sh, sl = swing_points(candles[start:], k=k)
     sh = [(i + start, p) for i, p in sh]
     sl = [(i + start, p) for i, p in sl]
-    if len(sh) >= 2 and len(sl) >= 2:
-        hh = sh[-1][1] > sh[-2][1]
-        hl = sl[-1][1] > sl[-2][1]
-        lh = sh[-1][1] < sh[-2][1]
-        ll = sl[-1][1] < sl[-2][1]
-        last_high, last_low = sh[-1], sl[-1]
-        pts = [point(candles, i, p, "H") for i, p in sh[-2:]] + [point(candles, i, p, "L") for i, p in sl[-2:]]
-        pts.sort(key=lambda p: p["index"])
-        if hh and hl:
-            out.append(make_row("higher_high_higher_low", "bullish", "confirmed", candles, level=last_low[1],
-                                target=None, stop_hint=last_low[1] - 0.3 * atr, points=pts, quality=55,
-                                break_index=None, extra={"last_swing_high": round(last_high[1], 4),
-                                                         "last_swing_low": round(last_low[1], 4)}))
-            # BOS up: close above the last swing high in the last RECENT bars.
-            brk = next((j for j in range(n - RECENT, n) if j > last_high[0] and closes[j] > last_high[1]), None)
-            if brk is not None:
-                out.append(make_row("break_of_structure", "bullish", "confirmed", candles, level=last_high[1],
-                                    target=last_high[1] + (last_high[1] - last_low[1]), stop_hint=last_low[1] - 0.3 * atr,
-                                    points=pts + [point(candles, brk, closes[brk], "BOS")], quality=60, break_index=brk))
-            # CHoCH: close below the last higher low.
-            ch = next((j for j in range(n - RECENT, n) if j > last_low[0] and closes[j] < last_low[1]), None)
-            if ch is not None:
-                out.append(make_row("change_of_character", "bearish", "confirmed", candles, level=last_low[1],
-                                    target=sl[-2][1], stop_hint=last_high[1] + 0.3 * atr,
-                                    points=pts + [point(candles, ch, closes[ch], "CHoCH")], quality=60, break_index=ch))
-        elif lh and ll:
-            out.append(make_row("lower_high_lower_low", "bearish", "confirmed", candles, level=last_high[1],
-                                target=None, stop_hint=last_high[1] + 0.3 * atr, points=pts, quality=55,
-                                break_index=None, extra={"last_swing_high": round(last_high[1], 4),
-                                                         "last_swing_low": round(last_low[1], 4)}))
-            brk = next((j for j in range(n - RECENT, n) if j > last_low[0] and closes[j] < last_low[1]), None)
-            if brk is not None:
-                out.append(make_row("break_of_structure", "bearish", "confirmed", candles, level=last_low[1],
-                                    target=last_low[1] - (last_high[1] - last_low[1]), stop_hint=last_high[1] + 0.3 * atr,
-                                    points=pts + [point(candles, brk, closes[brk], "BOS")], quality=60, break_index=brk))
-            ch = next((j for j in range(n - RECENT, n) if j > last_high[0] and closes[j] > last_high[1]), None)
-            if ch is not None:
-                out.append(make_row("change_of_character", "bullish", "confirmed", candles, level=last_high[1],
-                                    target=sh[-2][1], stop_hint=last_low[1] - 0.3 * atr,
-                                    points=pts + [point(candles, ch, closes[ch], "CHoCH")], quality=60, break_index=ch))
+    if len(sh) < 2 or len(sl) < 2:
+        return out
+
+    def row(name: str, *args, **kw) -> dict:
+        r = make_row(prefix + name, *args, **kw)
+        if timeframe != "1D":
+            r["timeframe"] = timeframe
+        if label_suffix:
+            r["label_suffix"] = label_suffix
+        return r
+
+    hh = sh[-1][1] > sh[-2][1]
+    hl = sl[-1][1] > sl[-2][1]
+    lh = sh[-1][1] < sh[-2][1]
+    ll = sl[-1][1] < sl[-2][1]
+    last_high, last_low = sh[-1], sl[-1]
+    pts = [point(candles, i, p, "H") for i, p in sh[-2:]] + [point(candles, i, p, "L") for i, p in sl[-2:]]
+    pts.sort(key=lambda p: p["index"])
+    if hh and hl:
+        out.append(row("higher_high_higher_low", "bullish", "confirmed", candles, level=last_low[1],
+                       target=None, stop_hint=last_low[1] - 0.3 * atr, points=pts, quality=55,
+                       break_index=None, extra={"last_swing_high": round(last_high[1], 4),
+                                                "last_swing_low": round(last_low[1], 4)}))
+        # BOS up: close above the last swing high in the last ``recent`` bars.
+        brk = next((j for j in range(n - recent, n) if j > last_high[0] and closes[j] > last_high[1]), None)
+        if brk is not None:
+            out.append(row("break_of_structure", "bullish", "confirmed", candles, level=last_high[1],
+                           target=last_high[1] + (last_high[1] - last_low[1]), stop_hint=last_low[1] - 0.3 * atr,
+                           points=pts + [point(candles, brk, closes[brk], "BOS")], quality=60, break_index=brk))
+        # CHoCH: close below the last higher low.
+        ch = next((j for j in range(n - recent, n) if j > last_low[0] and closes[j] < last_low[1]), None)
+        if ch is not None:
+            out.append(row("change_of_character", "bearish", "confirmed", candles, level=last_low[1],
+                           target=sl[-2][1], stop_hint=last_high[1] + 0.3 * atr,
+                           points=pts + [point(candles, ch, closes[ch], "CHoCH")], quality=60, break_index=ch))
+    elif lh and ll:
+        out.append(row("lower_high_lower_low", "bearish", "confirmed", candles, level=last_high[1],
+                       target=None, stop_hint=last_high[1] + 0.3 * atr, points=pts, quality=55,
+                       break_index=None, extra={"last_swing_high": round(last_high[1], 4),
+                                                "last_swing_low": round(last_low[1], 4)}))
+        brk = next((j for j in range(n - recent, n) if j > last_low[0] and closes[j] < last_low[1]), None)
+        if brk is not None:
+            out.append(row("break_of_structure", "bearish", "confirmed", candles, level=last_low[1],
+                           target=last_low[1] - (last_high[1] - last_low[1]), stop_hint=last_high[1] + 0.3 * atr,
+                           points=pts + [point(candles, brk, closes[brk], "BOS")], quality=60, break_index=brk))
+        ch = next((j for j in range(n - recent, n) if j > last_high[0] and closes[j] > last_high[1]), None)
+        if ch is not None:
+            out.append(row("change_of_character", "bullish", "confirmed", candles, level=last_high[1],
+                           target=sh[-2][1], stop_hint=last_low[1] - 0.3 * atr,
+                           points=pts + [point(candles, ch, closes[ch], "CHoCH")], quality=60, break_index=ch))
     return out

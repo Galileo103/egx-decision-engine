@@ -304,7 +304,7 @@ include all routers, then `app.mount("/", StaticFiles(directory="web", html=True
 | GET /api/market/sector/{name} | market.sector_detail |
 | GET /api/market/global | market.global_snapshot |
 | POST /api/market/snapshot | market.snapshot_universe |
-| GET /api/stocks/{symbol}?timeframe= | stocks.detail |
+| GET /api/stocks/{symbol}?timeframe= | stocks.detail — `timeframe=1W` runs the same analysis on weekly candles (the Score / Trade plan `1D | 1W` toggle) |
 | GET /api/stocks/{symbol}/mtf | stocks.mtf |
 | GET /api/stocks/{symbol}/smart-money | stocks.smart_money |
 | GET /api/stocks/{symbol}/news | stocks.news |
@@ -346,9 +346,10 @@ include all routers, then `app.mount("/", StaticFiles(directory="web", html=True
 | GET /api/screener/patterns?universe=&status=&category= | patterns.latest (stored pattern scan, 7 categories) |
 | GET /api/screener/patterns/catalog | patterns.catalog (all ~75 patterns: category, direction, kind, tiers, EGX stats) |
 | POST /api/screener/patterns/refresh | patterns.compute(persist=True) |
-| GET /api/stocks/{symbol}/patterns | patterns.detect (one symbol, live). Rows carry `event_id`, `event_headline`, `also_seen_as`, `age_days`, `horizon`; response adds `events` (one per clustered event, newest first), `distinct_events`, `events_by_direction`, `decisive_level` |
-| GET /api/stocks/{symbol}/levels | levels.compute (tested S/R zones, 52w, round numbers, SMAs) |
-| GET /api/stocks/{symbol}/checklist | checklist.checklist (six-pillar decision checklist) |
+| GET /api/stocks/{symbol}/patterns | patterns.detect (one symbol, live). Rows carry `event_id`, `event_headline`, `also_seen_as`, `age_days`, `horizon`; `weekly_*` structure rows carry `timeframe: "1W"` and never cluster with daily rows; response adds `events` (one per clustered event, newest first), `distinct_events`, `events_by_direction`, `decisive_level` |
+| (module) app.services.weekly | `resample(candles)` daily → Sunday–Thursday weekly OHLCV; `context(candles)` weekly trend (structure, 10/40-week averages, one sentence); `zones(candles)` tested weekly swing zones; `structure_rows(candles)` weekly HH/HL, LH/LL, BOS, CHoCH as `weekly_*` pattern rows. No I/O — callers pass daily candles |
+| GET /api/stocks/{symbol}/levels | levels.compute (tested S/R zones, 52w, round numbers, SMAs). Adds `weekly_supports` / `weekly_resistances` (daily candles resampled to weeks, 2+ weekly touches) and flags `weekly` + `weekly_touches` on daily levels that sit on one; `key_levels` may include `timeframe: "1W"` zones |
+| GET /api/stocks/{symbol}/checklist | checklist.checklist (six-pillar decision checklist). Trend pillar text ends with a `Weekly:` sentence and carries `weekly` {trend, structure, sma10, sma40, …}; weekly pattern rows are excluded from the Price-action pillar |
 | POST /api/screener/leaders/refresh | leaders.compute(persist=True) |
 | GET /api/portfolio/guardian | guardian.evaluate(persist=False, notify=False) |
 | POST /api/portfolio/guardian/run | guardian.evaluate(persist=True, notify=body.notify) |

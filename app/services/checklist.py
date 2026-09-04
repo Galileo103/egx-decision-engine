@@ -42,7 +42,7 @@ def _member_keys(head: dict, rows: list[dict]) -> list[str]:
 def checklist(symbol: str) -> dict:
     """Run the six pillars for one symbol. Never raises."""
     try:
-        from app.services import leaders, levels, patterns
+        from app.services import leaders, levels, patterns, weekly
         from app.services.rules_backtest import Ind
 
         sym = str(symbol or "").upper().strip().split(":")[-1]
@@ -56,7 +56,7 @@ def checklist(symbol: str) -> dict:
         pats = patterns.detect(sym, candles).get("patterns") or []
         out: dict[str, dict] = {}
 
-        # 1. Trend
+        # 1. Trend — daily first, then the weekly context (daily candles resampled).
         sma20, sma50 = x.sma20[-1], x.sma50[-1]
         sma50_prev = x.sma50[-11] if len(x.c) > 11 else None
         structure = next((r for r in pats if r["pattern"] in ("higher_high_higher_low", "lower_high_lower_low")), None)
@@ -75,10 +75,27 @@ def checklist(symbol: str) -> dict:
             out["trend"] = _p("fail", f"Price {price:.2f} below the 50-day average ({sma50:.2f}) and the 20-day is below the 50-day — a downtrend. Buying against it needs a reason.")
         else:
             out["trend"] = _p("warn", f"Mixed: price {price:.2f}, 20-day {sma20:.2f}, 50-day {sma50:.2f}. No clear trend yet." if sma20 and sma50 else "Not enough history for the averages.")
+        wk = weekly.context(candles)
+        if "error" not in wk:
+            out["trend"]["text"] += " " + wk["text"]
+            # A daily uptrend inside a weekly downtrend is a bounce, not a trend.
+            if (out["trend"]["status"] in ("pass", "warn") and wk["trend"] == "down"
+                    and sma50 and price > sma50):
+                out["trend"]["status"] = "warn"
+                out["trend"]["text"] += " Treat the daily uptrend as a counter-trend bounce."
+            elif out["trend"]["status"] == "fail" and wk["trend"] == "up":
+                out["trend"]["text"] += " A pullback inside a larger uptrend — watch for the daily trend to turn back up."
+            out["trend"]["weekly"] = {k: wk.get(k) for k in ("trend", "structure", "sma10", "sma40", "above_sma10",
+                                                                "above_sma40", "sma40_rising", "bars", "as_of")}
 
         # 2. Support / resistance
         pos = lv.get("position")
         near_s, near_r = lv.get("nearest_support"), lv.get("nearest_resistance")
+        wk_note = ""
+        for side, lvl in (("support", near_s), ("resistance", near_r)):
+            if lvl and lvl.get("weekly"):
+                wk_note = f" The nearest {side} {lvl['level']:.2f} is also a weekly zone (tested {lvl.get('weekly_touches', 0)}x on the weekly chart) — the larger trend respects it."
+                break
         if "error" in lv:
             out["support_resistance"] = _p("warn", "Levels unavailable.")
         elif pos == "at support":
@@ -94,6 +111,8 @@ def checklist(symbol: str) -> dict:
                 out["support_resistance"] = _p("pass", f"Mid-range but favourable: {room_up:.1f}% of room up to resistance {near_r['level']:.2f} versus {room_dn:.1f}% down to support {near_s['level']:.2f}.")
             else:
                 out["support_resistance"] = _p("warn", (lv.get("note") or "Mid-range.") + (f" Room up {room_up:.1f}%, room down {room_dn:.1f}% — not an edge." if near_r and near_s else ""))
+        if wk_note and "error" not in lv:
+            out["support_resistance"]["text"] += wk_note
 
         # 3. Volume
         v20 = x.vavg[-1] or 0.0
@@ -117,7 +136,7 @@ def checklist(symbol: str) -> dict:
         # One event, several names (False Breakout + Bull Trap, HH/HL + BOS…): the
         # scanner clusters them; count and name events, not rows.
         events = [r for r in pats if r["category"] in ("price_action", "candlestick") and r["status"] == "confirmed"
-                  and r.get("event_headline", True)]
+                  and r.get("event_headline", True) and r.get("timeframe", "1D") == "1D"]  # weekly rows feed Trend
         bull = [r for r in events if r["direction"] == "bullish"]
         bear = [r for r in events if r["direction"] == "bearish"]
         red_names = {"bull_trap", "false_breakout", "change_of_character", "failed_retest", "upthrust"}

@@ -913,3 +913,9 @@ a:hover { text-decoration: underline; }
 .pat-also { font-size: 11.5px; }
 .pat-members { margin: 2px 0 2px 18px; padding-left: 8px; border-left: 2px solid var(--line); }
 .pat-sub .pat-summary { font-size: 12.5px; }
+
+.tf-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.tf-btn { background: transparent; color: var(--muted); border: 0; padding: 2px 8px; font-size: 11px; font-family: 'IBM Plex Mono', monospace; cursor: pointer; }
+.tf-btn.active { background: var(--line); color: var(--text, inherit); }
+.tf-tag { font-size: 11px; font-weight: 400; margin-left: 4px; }
+.lv-w { font-size: 9.5px; padding: 0 4px; margin-left: 4px; line-height: 14px; }

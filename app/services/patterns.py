@@ -443,6 +443,8 @@ SAME_EVENT: frozenset[frozenset[str]] = frozenset({
     frozenset({"throwback", "retest"}),
     frozenset({"higher_high_higher_low", "break_of_structure"}),
     frozenset({"lower_high_lower_low", "break_of_structure"}),
+    frozenset({"weekly_higher_high_higher_low", "weekly_break_of_structure"}),
+    frozenset({"weekly_lower_high_lower_low", "weekly_break_of_structure"}),
 })
 EVENT_TARGET_TOL_ATR = 0.3   # targets this close (in ATR) …
 EVENT_BREAK_TOL_BARS = 1     # … broken within this many sessions of each other = one event
@@ -473,6 +475,8 @@ def horizon_of(age_days: Optional[int]) -> str:
 def _same_event(a: dict, b: dict, atr: float, date_index: dict[str, int]) -> bool:
     if a.get("direction") != b.get("direction") or a.get("direction") == "neutral":
         return False
+    if a.get("timeframe", "1D") != b.get("timeframe", "1D"):
+        return False  # a weekly and a daily row are different facts even on the same day
     if frozenset({a["pattern"], b["pattern"]}) in SAME_EVENT:
         return True
     ta, tb = a.get("target"), b.get("target")
@@ -592,6 +596,13 @@ def detect(symbol: str, candles_in: Optional[list[dict]] = None) -> dict:
                     found.append(r)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("%s failed for %s: %s", module.__name__, sym, exc)
+        # Weekly structure (daily candles resampled): the larger trend as rows of
+        # their own, tagged timeframe="1W" so the checklist routes them to Trend.
+        from app.services import weekly
+
+        for r in weekly.structure_rows(candles):
+            r["symbol"] = sym
+            found.append(r)
         from app.services.pattern_catalog import enrich
 
         found = [enrich(r) for r in found]
