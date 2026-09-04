@@ -431,6 +431,116 @@ def _count_by(rows: list[dict], key: str) -> dict[str, int]:
 JOURNAL_MIN_QUALITY = 50
 
 
+# ── event clustering ─────────────────────────────────────────────────────────
+# Several detectors describe ONE market event with more than one row: a failed
+# upside break is emitted as False Breakout AND Bull Trap; a held retest as
+# Throwback AND Retest; a rising swing structure as HH/HL AND (when the last
+# high breaks) BOS. The panel and the checklist must count events, not rows.
+
+SAME_EVENT: frozenset[frozenset[str]] = frozenset({
+    frozenset({"false_breakout", "bull_trap"}),
+    frozenset({"false_breakout", "bear_trap"}),
+    frozenset({"throwback", "retest"}),
+    frozenset({"higher_high_higher_low", "break_of_structure"}),
+    frozenset({"lower_high_lower_low", "break_of_structure"}),
+})
+EVENT_TARGET_TOL_ATR = 0.3   # targets this close (in ATR) …
+EVENT_BREAK_TOL_BARS = 1     # … broken within this many sessions of each other = one event
+
+
+def _age_days(start: Optional[str], as_of: Optional[str]) -> Optional[int]:
+    try:
+        d0 = datetime.strptime(str(start)[:10], "%Y-%m-%d")
+        d1 = datetime.strptime(str(as_of)[:10], "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None
+    return max(0, (d1 - d0).days)
+
+
+def horizon_of(age_days: Optional[int]) -> str:
+    """Bucket a pattern's age so a 3-month base and a 2-day trap are never read as peers."""
+    if age_days is None:
+        return "unknown"
+    if age_days <= 1:
+        return "today"
+    if age_days <= 7:
+        return "days"
+    if age_days <= 60:
+        return "weeks"
+    return "months"
+
+
+def _same_event(a: dict, b: dict, atr: float, date_index: dict[str, int]) -> bool:
+    if a.get("direction") != b.get("direction") or a.get("direction") == "neutral":
+        return False
+    if frozenset({a["pattern"], b["pattern"]}) in SAME_EVENT:
+        return True
+    ta, tb = a.get("target"), b.get("target")
+    ia, ib = date_index.get(str(a.get("break_date"))), date_index.get(str(b.get("break_date")))
+    if ta is None or tb is None or ia is None or ib is None:
+        return False
+    return abs(ta - tb) <= EVENT_TARGET_TOL_ATR * atr and abs(ia - ib) <= EVENT_BREAK_TOL_BARS
+
+
+def cluster_events(rows: list[dict], atr: float, candles: list[dict]) -> list[dict]:
+    """Group rows that describe the same event. Mutates rows (event_id, age_days,
+    horizon, event_headline, also_seen_as) and returns one summary per event."""
+    as_of = str(candles[-1].get("time")) if candles else None
+    date_index = {str(c.get("time")): i for i, c in enumerate(candles)}
+    n = len(rows)
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _same_event(rows[i], rows[j], atr, date_index):
+                parent[find(i)] = find(j)
+    groups: dict[int, list[dict]] = {}
+    for i, r in enumerate(rows):
+        r["age_days"] = _age_days(r.get("start_date"), as_of)
+        r["horizon"] = horizon_of(r["age_days"])
+        groups.setdefault(find(i), []).append(r)
+    events: list[dict] = []
+    # Newest event first; ties by quality.
+    ordered = sorted(groups.values(), key=lambda g: (min((r.get("age_days") or 0) for r in g),
+                                                     -max(r.get("quality", 0) for r in g)))
+    for eid, members in enumerate(ordered, start=1):
+        members.sort(key=lambda r: (r.get("status") == "confirmed", r.get("quality", 0)), reverse=True)
+        head = members[0]
+        for r in members:
+            r["event_id"] = eid
+            r["event_headline"] = r is head
+            r["also_seen_as"] = [m["label"] for m in members if m is not head] if r is head else []
+        events.append({
+            "event_id": eid, "label": head["label"], "pattern": head["pattern"],
+            "direction": head.get("direction"), "status": head.get("status"),
+            "quality": head.get("quality"), "target": head.get("target"), "target_pct": head.get("target_pct"),
+            "neckline": head.get("neckline"), "break_date": head.get("break_date"),
+            "start_date": min((m.get("start_date") or as_of or "") for m in members) or None,
+            "age_days": head.get("age_days"), "horizon": head.get("horizon"),
+            "also_seen_as": head["also_seen_as"], "framings": len(members),
+        })
+    return events
+
+
+def decisive_level(rows: list[dict], atr: float) -> Optional[dict]:
+    """The trigger/neckline nearest to the last close — the line that flips the picture."""
+    cands = [r for r in rows if r.get("neckline") is not None and r.get("distance_to_neckline_pct") is not None]
+    if not cands:
+        return None
+    best = min(cands, key=lambda r: abs(r["distance_to_neckline_pct"]))
+    lvl = best["neckline"]
+    at_level = [r for r in cands if abs(r["neckline"] - lvl) <= 0.1 * atr]
+    return {"level": lvl, "pct_away": best["distance_to_neckline_pct"],
+            "labels": sorted({r["label"] for r in at_level}),
+            "directions": sorted({r["direction"] for r in at_level})}
+
+
 def detect(symbol: str, candles_in: Optional[list[dict]] = None) -> dict:
     """All patterns currently visible on one symbol's daily chart."""
     try:
@@ -490,10 +600,15 @@ def detect(symbol: str, candles_in: Optional[list[dict]] = None) -> dict:
             r.get("status") == "confirmed" and r.get("move_progress_pct") is not None
             and r["move_progress_pct"] >= 100.0)]
         found.sort(key=lambda r: (r["status"] == "confirmed", r["quality"]), reverse=True)
+        events = cluster_events(found, atr, candles)
+        heads = [r for r in found if r.get("event_headline")]
         return {"symbol": sym, "patterns": found, "atr14": round(atr, 4),
                 "as_of": str(candles[-1].get("time")), "bars": len(candles),
                 "by_category": _count_by(found, "category"),
-                "by_direction": _count_by(found, "direction")}
+                "by_direction": _count_by(found, "direction"),
+                "events": events, "distinct_events": len(events),
+                "events_by_direction": _count_by(heads, "direction"),
+                "decisive_level": decisive_level(found, atr)}
     except Exception as exc:  # noqa: BLE001
         return {"symbol": symbol, "patterns": [], "error": str(exc)}
 

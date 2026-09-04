@@ -346,7 +346,7 @@ include all routers, then `app.mount("/", StaticFiles(directory="web", html=True
 | GET /api/screener/patterns?universe=&status=&category= | patterns.latest (stored pattern scan, 7 categories) |
 | GET /api/screener/patterns/catalog | patterns.catalog (all ~75 patterns: category, direction, kind, tiers, EGX stats) |
 | POST /api/screener/patterns/refresh | patterns.compute(persist=True) |
-| GET /api/stocks/{symbol}/patterns | patterns.detect (one symbol, live) |
+| GET /api/stocks/{symbol}/patterns | patterns.detect (one symbol, live). Rows carry `event_id`, `event_headline`, `also_seen_as`, `age_days`, `horizon`; response adds `events` (one per clustered event, newest first), `distinct_events`, `events_by_direction`, `decisive_level` |
 | GET /api/stocks/{symbol}/levels | levels.compute (tested S/R zones, 52w, round numbers, SMAs) |
 | GET /api/stocks/{symbol}/checklist | checklist.checklist (six-pillar decision checklist) |
 | POST /api/screener/leaders/refresh | leaders.compute(persist=True) |

@@ -345,38 +345,64 @@
         box.appendChild(el("div", { class: "muted", text: "No chart shape, candlestick or price-action pattern on the daily chart right now." }));
         return;
       }
-      // Shapes first, then price action, candlesticks last; confirmed before forming.
-      var ORDER = { reversal: 0, triangle: 1, wedge: 2, channel: 3, continuation: 4, price_action: 5, candlestick: 6 };
-      rows.sort(function (a, b) {
-        var c = (ORDER[a.category] || 9) - (ORDER[b.category] || 9);
-        if (c) return c;
-        if ((a.status === "confirmed") !== (b.status === "confirmed")) return a.status === "confirmed" ? -1 : 1;
-        return (b.quality || 0) - (a.quality || 0);
+      // One market event can arrive as several rows (False Breakout + Bull Trap, HH/HL + BOS…).
+      // The scanner clusters them: render one item per EVENT, newest first, with the other
+      // framings folded inside — and count events, never rows.
+      function hzText(r) {
+        var a = r.age_days;
+        if (a === null || a === undefined) return "";
+        if (a <= 1) return "today";
+        if (a < 14) return a + " days";
+        if (a < 60) return Math.round(a / 7) + " wk";
+        return Math.round(a / 30) + " mo";
+      }
+      var groups = {}, order = [];
+      rows.forEach(function (r) {
+        var k = r.event_id !== undefined && r.event_id !== null ? String(r.event_id) : "row-" + r.pattern + (r.start_date || "");
+        if (!groups[k]) { groups[k] = []; order.push(k); }
+        groups[k].push(r);
       });
-      var nShape = rows.filter(function (r) { return ORDER[r.category] <= 4; }).length;
-      var nPA = rows.filter(function (r) { return r.category === "price_action"; }).length;
-      var nC = rows.filter(function (r) { return r.category === "candlestick"; }).length;
-      box.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px", text: [
-        nShape ? nShape + " chart shape" + (nShape > 1 ? "s" : "") : null,
-        nPA ? nPA + " price-action event" + (nPA > 1 ? "s" : "") : null,
-        nC ? nC + " candlestick" + (nC > 1 ? "s" : "") : null].filter(Boolean).join(" · ") }));
+      var events = order.map(function (k) {
+        var g = groups[k].slice().sort(function (a, b) {
+          if (!!a.event_headline !== !!b.event_headline) return a.event_headline ? -1 : 1;
+          if ((a.status === "confirmed") !== (b.status === "confirmed")) return a.status === "confirmed" ? -1 : 1;
+          return (b.quality || 0) - (a.quality || 0);
+        });
+        return { head: g[0], members: g.slice(1) };
+      });
+      // Newest first, then quality — a 3-month base must never bury a 2-day trap.
+      events.sort(function (a, b) {
+        var da = a.head.age_days === null || a.head.age_days === undefined ? 1e9 : a.head.age_days;
+        var db = b.head.age_days === null || b.head.age_days === undefined ? 1e9 : b.head.age_days;
+        if (da !== db) return da - db;
+        return (b.head.quality || 0) - (a.head.quality || 0);
+      });
+      var nBull = events.filter(function (e) { return e.head.direction === "bullish"; }).length;
+      var nBear = events.filter(function (e) { return e.head.direction === "bearish"; }).length;
+      var nNeu = events.length - nBull - nBear;
+      var framBull = rows.filter(function (r) { return r.direction === "bullish"; }).length;
+      var framBear = rows.filter(function (r) { return r.direction === "bearish"; }).length;
+      function countTxt(n, word, frames) {
+        if (!n) return null;
+        var t = n + " " + word + (n > 1 ? "s" : "");
+        if (frames > n) t += " (seen " + frames + " ways)";
+        return t;
+      }
+      box.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:4px", text: [
+        countTxt(nBull, "bullish fact", framBull),
+        countTxt(nBear, "bearish event", framBear),
+        nNeu ? nNeu + " neutral" : null].filter(Boolean).join(" · ") + (rows.length > events.length ? " · " + rows.length + " rows" : "") }));
+      var dl0 = p && p.decisive_level;
+      if (dl0 && dl0.level !== null && dl0.level !== undefined) {
+        var pct = dl0.pct_away;
+        box.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px", text:
+          "Decisive level " + fmtNum(dl0.level) + " (" + (pct > 0 ? "+" : "") + fmtNum(pct) + "% away) — " + (dl0.labels || []).join(", ") + ". A close through it flips this line." }));
+      }
       var MAX_VISIBLE = 6;
       var list = el("div");
-      rows.forEach(function (r, idx) {
-        var item = el("details", { class: "pat-item" });
-        if (idx >= MAX_VISIBLE) { item.setAttribute("data-extra", "1"); item.style.display = "none"; }
-        var head = el("summary", { class: "pat-summary" });
-        head.appendChild(el("strong", { text: r.label + (r.broke === "up" ? " ↑ broke up" : (r.broke === "down" ? " ↓ broke down" : "")) }));
-        head.appendChild(el("span", { class: "badge " + (r.direction === "bullish" ? "buy" : (r.direction === "bearish" ? "sell" : "neutral")), text: r.direction }));
-        head.appendChild(el("span", { class: "badge " + (r.status === "confirmed" ? "up" : "neutral"), text: r.status }));
-        var gist = [];
-        if (r.target !== null && r.target !== undefined && r.target_pct !== null && r.target_pct !== undefined) gist.push("target " + fmtNum(r.target) + " (" + (r.target_pct > 0 ? "+" : "") + fmtNum(r.target_pct) + "%)");
-        else if (r.neckline !== null && r.neckline !== undefined) gist.push("trigger " + fmtNum(r.neckline));
-        gist.push("q " + Math.round(r.quality || 0));
-        head.appendChild(el("span", { class: "muted pat-gist", text: gist.join(" · ") }));
-        item.appendChild(head);
+      function rowBody(r) {
         var body = el("div", { class: "pat-body" });
-        body.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: String(r.category || "").replace("_", " ") + " · " + (r.kind || "") + " · reliability " + (r.reliability || "?") + " · " + (r.frequency || "") }));
+        body.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: String(r.category || "").replace("_", " ") + " · " + (r.kind || "") + " · reliability " + (r.reliability || "?") + " · " + (r.frequency || "") + (r.start_date ? " · since " + r.start_date : "") }));
         var dl = el("dl", { class: "kv" });
         var add = function (k, v) { if (v === null || v === undefined || v === "") return; dl.appendChild(el("dt", { text: k })); dl.appendChild(el("dd", { text: v })); };
         if (r.neckline !== null && r.neckline !== undefined) add("Trigger / neckline", fmtNum(r.neckline) + (r.distance_to_neckline_pct !== null && r.distance_to_neckline_pct !== undefined ? " (" + (r.distance_to_neckline_pct > 0 ? "+" : "") + fmtNum(r.distance_to_neckline_pct) + "% away)" : ""));
@@ -388,12 +414,49 @@
         add("Points", (r.points || []).map(function (pt) { return pt.label + " " + fmtNum(pt.price) + " (" + pt.time + ")"; }).join(" · "));
         body.appendChild(dl);
         if (r.note) body.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:6px", text: r.note }));
-        item.appendChild(body);
+        return body;
+      }
+      function gistOf(r) {
+        var gist = [];
+        if (r.target !== null && r.target !== undefined && r.target_pct !== null && r.target_pct !== undefined) gist.push("target " + fmtNum(r.target) + " (" + (r.target_pct > 0 ? "+" : "") + fmtNum(r.target_pct) + "%)");
+        else if (r.neckline !== null && r.neckline !== undefined) gist.push("trigger " + fmtNum(r.neckline));
+        gist.push("q " + Math.round(r.quality || 0));
+        return gist.join(" · ");
+      }
+      events.forEach(function (ev, idx) {
+        var r = ev.head;
+        var item = el("details", { class: "pat-item" });
+        if (idx >= MAX_VISIBLE) { item.setAttribute("data-extra", "1"); item.style.display = "none"; }
+        var head = el("summary", { class: "pat-summary" });
+        var hz = hzText(r);
+        if (hz) head.appendChild(el("span", { class: "pat-hz", text: hz, title: "How long this has been building (since " + (r.start_date || "?") + ")" }));
+        head.appendChild(el("strong", { text: r.label + (r.broke === "up" ? " ↑ broke up" : (r.broke === "down" ? " ↓ broke down" : "")) }));
+        head.appendChild(el("span", { class: "badge " + (r.direction === "bullish" ? "buy" : (r.direction === "bearish" ? "sell" : "neutral")), text: r.direction }));
+        head.appendChild(el("span", { class: "badge " + (r.status === "confirmed" ? "up" : "neutral"), text: r.status }));
+        if (ev.members.length) head.appendChild(el("span", { class: "muted pat-also", text: "also: " + ev.members.map(function (m) { return m.label; }).join(", ") }));
+        head.appendChild(el("span", { class: "muted pat-gist", text: gistOf(r) }));
+        item.appendChild(head);
+        item.appendChild(rowBody(r));
+        if (ev.members.length) {
+          var sub = el("div", { class: "pat-members" });
+          sub.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin:4px 0", text: "Same event, other names — same candles, same target; not extra evidence:" }));
+          ev.members.forEach(function (m) {
+            var mi = el("details", { class: "pat-item pat-sub" });
+            var mh = el("summary", { class: "pat-summary" });
+            mh.appendChild(el("strong", { text: m.label }));
+            mh.appendChild(el("span", { class: "badge " + (m.status === "confirmed" ? "up" : "neutral"), text: m.status }));
+            mh.appendChild(el("span", { class: "muted pat-gist", text: gistOf(m) }));
+            mi.appendChild(mh);
+            mi.appendChild(rowBody(m));
+            sub.appendChild(mi);
+          });
+          item.appendChild(sub);
+        }
         list.appendChild(item);
       });
       box.appendChild(list);
-      if (rows.length > MAX_VISIBLE) {
-        var more = el("button", { class: "btn small", style: "margin-top:6px", text: "Show all " + rows.length });
+      if (events.length > MAX_VISIBLE) {
+        var more = el("button", { class: "btn small", style: "margin-top:6px", text: "Show all " + events.length + " events" });
         more.addEventListener("click", function () {
           var extra = list.querySelectorAll("[data-extra]");
           for (var k = 0; k < extra.length; k++) extra[k].style.display = "";

@@ -31,6 +31,14 @@ def _p(status: str, text: str, **extra: Any) -> dict:
     return {"status": status, "text": text, **extra}
 
 
+def _member_keys(head: dict, rows: list[dict]) -> list[str]:
+    """Pattern keys of the non-headline rows clustered with ``head``."""
+    eid = head.get("event_id")
+    if eid is None:
+        return []
+    return [r["pattern"] for r in rows if r.get("event_id") == eid and r is not head]
+
+
 def checklist(symbol: str) -> dict:
     """Run the six pillars for one symbol. Never raises."""
     try:
@@ -106,17 +114,32 @@ def checklist(symbol: str) -> dict:
             out["volume"] = _p("warn", f"{up_share * 100:.0f}% of recent volume on up days, activity {ratio:.1f}x average — no clear message from volume.")
 
         # 4. Price action (events + candlesticks on the last sessions)
-        events = [r for r in pats if r["category"] in ("price_action", "candlestick") and r["status"] == "confirmed"]
+        # One event, several names (False Breakout + Bull Trap, HH/HL + BOS…): the
+        # scanner clusters them; count and name events, not rows.
+        events = [r for r in pats if r["category"] in ("price_action", "candlestick") and r["status"] == "confirmed"
+                  and r.get("event_headline", True)]
         bull = [r for r in events if r["direction"] == "bullish"]
         bear = [r for r in events if r["direction"] == "bearish"]
-        red_flags = [r for r in bear if r["pattern"] in ("bull_trap", "false_breakout", "change_of_character", "failed_retest", "upthrust")]
-        names = lambda rs: ", ".join(r["label"] for r in rs[:3])  # noqa: E731
+        red_names = {"bull_trap", "false_breakout", "change_of_character", "failed_retest", "upthrust"}
+        red_flags = [r for r in bear if r["pattern"] in red_names
+                     or any(m in red_names for m in _member_keys(r, pats))]
+
+        def names(rs: list[dict]) -> str:
+            parts = []
+            for r in rs[:3]:
+                also = r.get("also_seen_as") or []
+                parts.append(r["label"] + (f" (also seen as {', '.join(also)})" if also else ""))
+            return ", ".join(parts)
+
+        def n_ev(rs: list[dict]) -> str:
+            return f"{len(rs)} event" + ("" if len(rs) == 1 else "s")
+
         if red_flags:
-            out["price_action"] = _p("fail", f"Bearish reversal signals on the tape: {names(red_flags)}." + (f" Bullish: {names(bull)}." if bull else ""))
+            out["price_action"] = _p("fail", f"Bearish reversal on the tape — {n_ev(red_flags)}: {names(red_flags)}." + (f" Bullish — {n_ev(bull)}: {names(bull)}." if bull else ""))
         elif len(bull) > len(bear) and bull:
-            out["price_action"] = _p("pass", f"Bullish events: {names(bull)}." + (f" Bearish: {names(bear)}." if bear else ""))
+            out["price_action"] = _p("pass", f"Bullish — {n_ev(bull)}: {names(bull)}." + (f" Bearish — {n_ev(bear)}: {names(bear)}." if bear else ""))
         elif bear and len(bear) > len(bull):
-            out["price_action"] = _p("fail", f"Bearish events outnumber bullish: {names(bear)}.")
+            out["price_action"] = _p("fail", f"Bearish events outnumber bullish — {n_ev(bear)}: {names(bear)}.")
         else:
             out["price_action"] = _p("warn", "No decisive price-action event on the last sessions." + (f" ({names(bull + bear)})" if bull or bear else ""))
 
