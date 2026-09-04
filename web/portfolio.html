@@ -22,6 +22,18 @@
       </section>
 
       <section class="pg-panel">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+          <h2 style="margin:0">Position Guardian — when to sell</h2>
+          <button type="button" class="pg-btn secondary" id="guardRunBtn" title="Persist today's verdicts and push actionable ones to Telegram">Run &amp; notify</button>
+        </div>
+        <div class="pg-muted" style="font-size:12px;margin:6px 0 10px">
+          One exit verdict per open position: stop or target reached, trailing-stop tighten, thesis broken
+          (score/signal turned since entry), or time stop. Runs automatically every 10 min in session and after the close.
+        </div>
+        <div id="guardBox"></div>
+      </section>
+
+      <section class="pg-panel">
         <h2>Open positions</h2>
         <div id="openBox"></div>
       </section>
@@ -38,20 +50,24 @@
           <label class="pg-field">Entry
             <input id="pEntry" type="number" step="any" min="0" required>
           </label>
-          <label class="pg-field">Stop
-            <input id="pStop" type="number" step="any" min="0" required>
+          <label class="pg-field">Stop <span class="pg-muted" style="font-weight:400">(auto)</span>
+            <input id="pStop" type="number" step="any" min="0" placeholder="from trade plan">
           </label>
-          <label class="pg-field">Target 1
-            <input id="pT1" type="number" step="any" min="0">
+          <label class="pg-field">Target 1 <span class="pg-muted" style="font-weight:400">(auto)</span>
+            <input id="pT1" type="number" step="any" min="0" placeholder="from trade plan">
           </label>
-          <label class="pg-field">Target 2
-            <input id="pT2" type="number" step="any" min="0">
+          <label class="pg-field">Target 2 <span class="pg-muted" style="font-weight:400">(auto)</span>
+            <input id="pT2" type="number" step="any" min="0" placeholder="from trade plan">
           </label>
-          <label class="pg-field">Note
-            <input id="pNote" type="text" required placeholder="why? setup · scanner · planned R:R">
+          <label class="pg-field">Note <span class="pg-muted" style="font-weight:400">(auto)</span>
+            <input id="pNote" type="text" placeholder="from trade plan — add your own reason if you like">
           </label>
           <button type="submit" class="pg-btn" id="posBtn">Open position</button>
         </form>
+        <div id="planHint" class="pg-muted" style="font-size:12px;margin-top:8px">
+          Type the symbol, shares and your fill price. Stop, targets and note are taken from the stock's trade plan
+          (the same levels the stock page shows) — you can overwrite any of them.
+        </div>
         <div id="posFormMsg" class="pg-muted" style="font-size:12px;margin-top:8px"></div>
       </section>
 
@@ -113,7 +129,7 @@
       var avgR = PG.findVal(p, ['avg_r', 'avg_r_multiple', 'average_r']);
       var openRisk = PG.findVal(p, ['open_risk', 'total_open_risk', 'risk_at_stops']);
       var winNode;
-      if (win === undefined || win === null || !isFinite(Number(win))) winNode = '—';
+      if (win === undefined || win === null || !isFinite(Number(win))) winNode = PG.mk('span', { class: 'pg-muted', style: 'font-size:12px' }, ['no closed trades yet']);
       else {
         // Backend contract: win_rate is already a percent (0-100). The old
         // "multiply values <= 1 by 100" guess rendered a real 1.0% as 100%.
@@ -123,7 +139,8 @@
       cards.appendChild(PG.metricCard('Realized PnL (net)', PG.signedNode(realized, ' EGP')));
       cards.appendChild(PG.metricCard('Unrealized PnL (net)', PG.signedNode(unreal, ' EGP')));
       cards.appendChild(PG.metricCard('Win rate (net)', winNode));
-      cards.appendChild(PG.metricCard('Avg R (net)', avgR === undefined ? '—' : PG.num(avgR)));
+      cards.appendChild(PG.metricCard('Avg R (net)', (avgR === undefined || avgR === null)
+        ? PG.mk('span', { class: 'pg-muted', style: 'font-size:12px' }, ['no closed trades yet']) : PG.num(avgR) + 'R'));
       cards.appendChild(PG.metricCard('Fees paid', fees === undefined || fees === null ? '—' : PG.num(fees) + ' EGP'));
       var heatPct = PG.findVal(p, ['open_heat_pct']);
       cards.appendChild(PG.metricCard('Open risk',
@@ -150,6 +167,104 @@
     }
   }
 
+  /* ---------- position guardian ---------- */
+
+  var SEVERITY_CLASS = { critical: 'down', action: 'accent', warning: 'warn', advice: 'warn', ok: 'up' };
+
+  function verdictBadge(verdict, severity) {
+    var cls = SEVERITY_CLASS[String(severity || '').toLowerCase()] || 'neutral';
+    return PG.mk('span', { class: 'badge ' + cls }, [String(verdict || '—').replace(/_/g, ' ')]);
+  }
+
+  function reasonsNode(reasons) {
+    var list = Array.isArray(reasons) ? reasons : [];
+    var wrap = PG.mk('div', { style: 'max-width:520px;white-space:normal;font-size:12px;line-height:1.45' });
+    list.forEach(function (r, i) {
+      var line = PG.mk('div', { style: i ? 'margin-top:4px' : '' }, [String(r)]);
+      wrap.appendChild(line);
+    });
+    if (!list.length) wrap.textContent = '—';
+    return wrap;
+  }
+
+  function markNode(row) {
+    if (row.mark === null || row.mark === undefined) return PG.mk('span', { class: 'pg-muted' }, ['—']);
+    var wrap = PG.mk('span', {}, [PG.num(row.mark)]);
+    var src = row.mark_source ? String(row.mark_source) : '';
+    var asOf = row.mark_as_of ? String(row.mark_as_of).slice(0, 10) : '';
+    if (src || asOf) {
+      wrap.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:10.5px' },
+        [(src ? src.replace(/_/g, ' ') : '') + (asOf ? ' · ' + asOf : '')]));
+    }
+    return wrap;
+  }
+
+  async function loadGuardian(preloaded) {
+    var box = $('guardBox');
+    PG.loading(box, 'Checking open positions…');
+    try {
+      var g = preloaded || await PG.api('get', '/api/portfolio/guardian');
+      if (!g || typeof g !== 'object') throw new Error('empty response');
+      if (g.error) throw new Error(g.error);
+      box.innerHTML = '';
+      var rows = Array.isArray(g.verdicts) ? g.verdicts : [];
+      if (!rows.length) {
+        box.appendChild(PG.mk('div', { class: 'pg-muted' }, ['No open positions — nothing to guard. Open one below and the guardian starts watching it.']));
+        return;
+      }
+      var sum = g.summary || {}, bySev = sum.by_severity || {};
+      var cards = PG.mk('div', { class: 'pg-cards' });
+      cards.appendChild(PG.metricCard('Open positions', String(sum.open !== undefined ? sum.open : rows.length)));
+      var need = Number(sum.needs_action || 0);
+      var needNode = PG.mk('span', { class: need ? 'badge down' : 'badge up' }, [String(need) + (need === 1 ? ' position' : ' positions')]);
+      cards.appendChild(PG.metricCard('Need a decision', needNode));
+      cards.appendChild(PG.metricCard('Critical / action / warning',
+        [bySev.critical || 0, bySev.action || 0, bySev.warning || 0].join(' / ')));
+      cards.appendChild(PG.metricCard('Advice / hold', [bySev.advice || 0, bySev.ok || 0].join(' / ')));
+      box.appendChild(cards);
+
+      box.appendChild(PG.table(rows, {
+        columns: [
+          { key: 'symbol', label: 'Symbol', numeric: false },
+          { key: 'verdict', label: 'Verdict', numeric: false, render: function (r) { return verdictBadge(r.verdict, r.severity); } },
+          { key: 'entry', label: 'Entry', numeric: true },
+          { key: 'stop', label: 'Stop', numeric: true },
+          { key: 'mark', label: 'Mark', numeric: true, render: markNode },
+          { key: 'r_now', label: 'R now', numeric: true, render: function (r) { return PG.signedNode(r.r_now, 'R'); } },
+          { key: 'peak_r', label: 'Peak R', numeric: true, render: function (r) { return PG.signedNode(r.peak_r, 'R'); } },
+          { key: 'suggested_stop', label: 'Suggested stop', numeric: true },
+          { key: 'bars_held', label: 'Sessions', numeric: true },
+          { key: 'reasons', label: 'Why', numeric: false, render: function (r) { return reasonsNode(r.reasons); } }
+        ],
+        onRow: PG.openStock
+      }));
+      if (typeof g.basis === 'string') {
+        box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:11.5px;margin-top:6px' }, [g.basis]));
+      }
+      box.appendChild(PG.detailsBlock('Full guardian payload', g));
+    } catch (e) {
+      PG.errBox(box, 'Guardian failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function runGuardian() {
+    var btn = $('guardRunBtn');
+    btn.disabled = true;
+    try {
+      var g = await PG.api('post', '/api/portfolio/guardian/run', { notify: true });
+      if (!g || typeof g !== 'object') throw new Error('empty response');
+      if (g.error) throw new Error(g.error);
+      var sum = g.summary || {};
+      PG.notify('Guardian ran — ' + (sum.needs_action || 0) + ' position(s) need a decision'
+        + (sum.notified ? ', ' + sum.notified + ' pushed to Telegram' : ''), 'success');
+      await loadGuardian(g);
+    } catch (e) {
+      PG.notify('Guardian run failed: ' + (e && e.message ? e.message : e), 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   /* ---------- positions ---------- */
 
   function findMarks(perf) {
@@ -163,7 +278,7 @@
                it.unrealized_pnl !== undefined || it.price !== undefined)) {
             var extra = {};
             ['last', 'price', 'market_price', 'mark_price', 'mark_source', 'mark_as_of',
-             'pnl', 'pnl_pct', 'unrealized_pnl', 'r_multiple'].forEach(function (k) {
+             'pnl', 'pnl_pct', 'unrealized_pnl', 'unrealized_pct', 'r_multiple'].forEach(function (k) {
               if (it[k] !== undefined && it[k] !== null) extra[k] = it[k];
             });
             if (Object.keys(extra).length) out[it.id !== undefined ? 'id:' + it.id : 'sym:' + it.symbol] = extra;
@@ -195,37 +310,188 @@
       });
 
       openBox.innerHTML = '';
-      openBox.appendChild(PG.table(open, {
-        exclude: ['plan_json', 'closed_at', 'exit_price', 'status'],
+      if (!open.length) {
+        openBox.appendChild(PG.mk('div', { class: 'pg-muted', style: 'padding:8px 0' },
+          ['No open positions. Record what you hold in "New position" below — symbol, shares and your fill price are enough.']));
+      } else openBox.appendChild(PG.table(open, {
         onRow: PG.openStock,
-        renderers: {
-          pnl: function (v) { return PG.signedNode(v, ''); },
-          unrealized_pnl: function (v) { return PG.signedNode(v, ''); },
-          pnl_pct: function (v) { return PG.pctNode(v); }
-        },
+        columns: [
+          { key: 'symbol', label: 'Symbol', numeric: false, render: function (r) {
+            return PG.mk('span', { style: 'font-weight:600' }, [String(r.symbol || '')]);
+          } },
+          { key: 'qty', label: 'Shares', numeric: true, render: function (r) { return PG.mk('span', {}, [PG.num(r.qty, 0)]); } },
+          { key: 'entry', label: 'Avg entry', numeric: true },
+          { key: 'mark_price', label: 'Mark', numeric: true, render: function (r) {
+            var m = r.mark_price !== undefined ? r.mark_price : r.last;
+            if (m === undefined || m === null) return PG.mk('span', { class: 'pg-muted' }, ['—']);
+            var wrap = PG.mk('span', {}, [PG.num(m)]);
+            if (r.mark_source) wrap.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:10.5px' }, [String(r.mark_source).replace(/_/g, ' ')]));
+            return wrap;
+          } },
+          { key: 'unrealized_pnl', label: 'Unrealized', numeric: true, render: function (r) {
+            if (r.unrealized_pnl === undefined || r.unrealized_pnl === null) return PG.mk('span', { class: 'pg-muted' }, ['—']);
+            var wrap = PG.mk('span', {}, [PG.signedNode(r.unrealized_pnl, ' EGP')]);
+            if (r.unrealized_pct !== undefined && r.unrealized_pct !== null) wrap.appendChild(PG.mk('div', { style: 'font-size:11px' }, [PG.pctNode(r.unrealized_pct)]));
+            return wrap;
+          } },
+          { key: 'r_now', label: 'R now', numeric: true, render: function (r) {
+            var m = r.mark_price !== undefined ? r.mark_price : r.last;
+            var anchor = (r.initial_stop !== undefined && r.initial_stop !== null) ? r.initial_stop : r.stop;
+            var risk = Number(r.entry) - Number(anchor);
+            if (m === undefined || m === null || !isFinite(risk) || risk <= 0) return PG.mk('span', { class: 'pg-muted', title: 'Initial risk unknown (stop at/above entry)' }, ['n/a']);
+            return PG.signedNode((Number(m) - Number(r.entry)) / risk, 'R');
+          } },
+          { key: 'stop', label: 'Stop', numeric: true, render: function (r) {
+            var wrap = PG.mk('span', {}, [r.stop === null || r.stop === undefined ? '—' : PG.num(r.stop)]);
+            if (r.initial_stop !== undefined && r.initial_stop !== null && Number(r.initial_stop) !== Number(r.stop)) {
+              wrap.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:10.5px', title: 'Stop at entry — R is measured against this' }, ['was ' + PG.num(r.initial_stop)]));
+            }
+            return wrap;
+          } },
+          { key: 'target1', label: 'Targets', numeric: true, render: function (r) {
+            var t1 = r.target1 === null || r.target1 === undefined ? '—' : PG.num(r.target1);
+            var t2 = r.target2 === null || r.target2 === undefined ? '—' : PG.num(r.target2);
+            return PG.mk('span', { class: 'pg-muted', style: 'white-space:nowrap' }, [t1 + ' / ' + t2]);
+          } },
+          { key: 'opened_at', label: 'Since', numeric: false, render: function (r) {
+            return PG.mk('span', { class: 'pg-muted', style: 'white-space:nowrap' }, [String(r.opened_at || '').slice(0, 10)]);
+          } },
+          { key: 'note', label: 'Why', numeric: false, render: function (r) {
+            var n = String(r.note || '');
+            var short = n.length > 70 ? n.slice(0, 67) + '…' : n;
+            return PG.mk('span', { class: 'pg-muted', title: n, style: 'font-size:12px;max-width:260px;display:inline-block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:middle' }, [short || '—']);
+          } }
+        ],
         trailing: [{
           label: '',
           render: function (row) {
+            var wrap = PG.mk('span', { style: 'display:inline-flex;gap:6px' });
+            var buy = PG.mk('button', { type: 'button', class: 'pg-btn secondary small', title: 'Buy: bought more shares — blends your average entry' }, ['+']);
+            buy.addEventListener('click', function () { fillPosition(row, 'buy'); });
+            var sell = PG.mk('button', { type: 'button', class: 'pg-btn secondary small', title: 'Sell: sold part of the position — realizes PnL on those shares' }, ['−']);
+            sell.addEventListener('click', function () { fillPosition(row, 'sell'); });
+            var s = PG.mk('button', { type: 'button', class: 'pg-btn secondary small', title: 'Move the protective stop (act on a TIGHTEN_STOP verdict)' }, ['Stop']);
+            s.addEventListener('click', function () { editStop(row); });
             var b = PG.mk('button', { type: 'button', class: 'pg-btn danger small' }, ['Close']);
             b.addEventListener('click', function () { closePosition(row); });
-            return b;
+            var x = PG.mk('button', { type: 'button', class: 'pg-btn secondary small', title: 'Remove: erase a record entered by mistake (duplicate / typo). Not a sale.' }, ['×']);
+            x.addEventListener('click', function () { removePosition(row); });
+            wrap.appendChild(buy); wrap.appendChild(sell); wrap.appendChild(s); wrap.appendChild(b); wrap.appendChild(x);
+            return wrap;
           }
         }]
       }));
 
       closedBox.innerHTML = '';
-      closedBox.appendChild(PG.table(closed, {
-        exclude: ['plan_json', 'status'],
+      if (!closed.length) {
+        closedBox.appendChild(PG.mk('div', { class: 'pg-muted', style: 'padding:8px 0' },
+          ['No closed trades yet. When you sell, press Close (or − for part of a position) and the result lands here with its R-multiple.']));
+      } else closedBox.appendChild(PG.table(closed.map(function (r) {
+        var qty = Number(r.qty), entry = Number(r.entry), exitP = Number(r.exit_price);
+        var gross = isFinite(qty * (exitP - entry)) ? qty * (exitP - entry) : null;
+        var fees = r.fees !== undefined && r.fees !== null ? Number(r.fees) : null;
+        var net = gross === null ? null : gross - (fees || 0);
+        var anchor = (r.initial_stop !== undefined && r.initial_stop !== null) ? r.initial_stop : r.stop;
+        var risk = entry - Number(anchor);
+        var rMult = (net !== null && isFinite(risk) && risk > 0 && qty) ? (net / qty) / risk : null;
+        return Object.assign({}, r, { _net: net, _r: rMult, _pct: (net !== null && entry && qty) ? net / (entry * qty) * 100 : null });
+      }), {
         onRow: PG.openStock,
-        renderers: {
-          pnl: function (v) { return PG.signedNode(v, ''); },
-          pnl_pct: function (v) { return PG.pctNode(v); },
-          r_multiple: function (v) { return PG.signedNode(v, 'R'); }
-        }
+        columns: [
+          { key: 'symbol', label: 'Symbol', numeric: false },
+          { key: 'qty', label: 'Shares', numeric: true, render: function (r) { return PG.mk('span', {}, [PG.num(r.qty, 0)]); } },
+          { key: 'entry', label: 'Entry', numeric: true },
+          { key: 'exit_price', label: 'Exit', numeric: true },
+          { key: '_net', label: 'Net PnL', numeric: true, render: function (r) { return r._net === null ? PG.mk('span', { class: 'pg-muted' }, ['—']) : PG.signedNode(r._net, ' EGP'); } },
+          { key: '_pct', label: 'Return', numeric: true, render: function (r) { return PG.pctNode(r._pct); } },
+          { key: '_r', label: 'R', numeric: true, render: function (r) { return r._r === null ? PG.mk('span', { class: 'pg-muted' }, ['n/a']) : PG.signedNode(r._r, 'R'); } },
+          { key: 'plan_followed', label: 'Plan followed', numeric: false, render: function (r) {
+            if (r.plan_followed === null || r.plan_followed === undefined) return PG.mk('span', { class: 'pg-muted' }, ['—']);
+            return PG.mk('span', { class: 'badge ' + (r.plan_followed ? 'up' : 'down') }, [r.plan_followed ? 'yes' : 'deviated']);
+          } },
+          { key: 'opened_at', label: 'Opened', numeric: false, render: function (r) { return PG.mk('span', { class: 'pg-muted' }, [String(r.opened_at || '').slice(0, 10)]); } },
+          { key: 'closed_at', label: 'Closed', numeric: false, render: function (r) { return PG.mk('span', { class: 'pg-muted' }, [String(r.closed_at || '').slice(0, 10)]); } },
+          { key: 'note', label: 'Why', numeric: false, render: function (r) {
+            var n = String(r.note || ''); var short = n.length > 60 ? n.slice(0, 57) + '…' : n;
+            return PG.mk('span', { class: 'pg-muted', title: n, style: 'font-size:12px' }, [short || '—']);
+          } }
+        ]
       }));
     } catch (e) {
       PG.errBox(openBox, 'Positions failed: ' + (e && e.message ? e.message : e));
       PG.errBox(closedBox, 'Positions failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function fillPosition(row, side) {
+    var isBuy = side === 'buy';
+    var label = (row.symbol || 'position') + ' (#' + row.id + ') — holding ' + PG.num(row.qty, 0) + ' @ avg ' + PG.num(row.entry);
+    var q = window.prompt((isBuy ? 'How many shares did you BUY?\n' : 'How many shares did you SELL?\n') + label, '');
+    if (q === null) return;
+    var qty = Number(q);
+    if (!isFinite(qty) || qty <= 0) { PG.notify('Quantity must be a positive number', 'error'); return; }
+    if (!isBuy && qty > Number(row.qty)) { PG.notify('You only hold ' + PG.num(row.qty, 0) + ' shares', 'error'); return; }
+    var hint = row.last !== undefined ? row.last : (row.mark_price !== undefined ? row.mark_price : row.entry);
+    var p = window.prompt((isBuy ? 'Buy' : 'Sell') + ' price per share for ' + PG.num(qty, 0) + ' × ' + row.symbol + ':',
+      hint === undefined || hint === null ? '' : String(hint));
+    if (p === null) return;
+    var price = Number(p);
+    if (!isFinite(price) || price <= 0) { PG.notify('Invalid price', 'error'); return; }
+    if (!isBuy && qty === Number(row.qty)) {
+      if (!window.confirm('That is the whole position — it will be CLOSED at ' + PG.num(price) + '. Continue?')) return;
+    }
+    try {
+      var res = await PG.api('post', '/api/portfolio/positions/' + encodeURIComponent(row.id) + '/fill',
+        { qty: isBuy ? qty : -qty, price: price });
+      var f = res && res.fill ? res.fill : {};
+      if (isBuy) {
+        PG.notify('Bought ' + PG.num(qty, 0) + ' × ' + row.symbol + ' @ ' + PG.num(price)
+          + ' — now ' + PG.num(f.qty_after, 0) + ' shares @ avg ' + PG.num(f.entry_after), 'success');
+      } else if (f.closed_position) {
+        PG.notify('Position closed at ' + PG.num(price) + (res.pnl !== undefined ? ' — net PnL ' + PG.num(res.pnl) + ' EGP' : ''), 'success');
+      } else {
+        PG.notify('Sold ' + PG.num(qty, 0) + ' × ' + row.symbol + ' @ ' + PG.num(price)
+          + ' — realized ' + PG.num(f.realized_pnl) + ' EGP net'
+          + (f.r_multiple !== undefined && f.r_multiple !== null ? ' (' + PG.num(f.r_multiple) + 'R)' : '')
+          + ', ' + PG.num(f.qty_after, 0) + ' shares left', 'success');
+      }
+      var warns = res && typeof res === 'object' ? res.risk_warnings : null;
+      if (Array.isArray(warns)) warns.forEach(function (w) { PG.notify('⚠ ' + w, 'error'); });
+      refreshPortfolio();
+    } catch (e) {
+      PG.notify((isBuy ? 'Buy' : 'Sell') + ' failed: ' + (e && e.message ? e.message : e), 'error');
+    }
+  }
+
+  async function removePosition(row) {
+    if (!window.confirm('Remove this record?\n\n' + row.symbol + ' #' + row.id + ' — ' + PG.num(row.qty, 0) + ' shares @ ' + PG.num(row.entry)
+      + '\n\nThis erases the row as if it was never entered (for duplicates and typos). '
+      + 'It is NOT a sale — if you actually sold, use Close or − Sell instead.')) return;
+    try {
+      await PG.api('del', '/api/portfolio/positions/' + encodeURIComponent(row.id));
+      PG.notify('Removed ' + row.symbol + ' #' + row.id, 'success');
+      refreshPortfolio();
+    } catch (e) {
+      PG.notify('Remove failed: ' + (e && e.message ? e.message : e), 'error');
+    }
+  }
+
+  async function editStop(row) {
+    var s = window.prompt('New protective stop for ' + (row.symbol || 'position') + ' (#' + row.id + ')\n'
+      + 'Current stop: ' + row.stop + ' · entry: ' + row.entry
+      + (row.initial_stop !== undefined && row.initial_stop !== null ? ' · initial stop: ' + row.initial_stop : '')
+      + '\n\nR multiples keep measuring against the initial stop.', row.stop === undefined || row.stop === null ? '' : String(row.stop));
+    if (s === null) return;
+    var x = Number(s);
+    if (!isFinite(x) || x <= 0) { PG.notify('Invalid stop', 'error'); return; }
+    try {
+      var res = await PG.api('post', '/api/portfolio/positions/' + encodeURIComponent(row.id) + '/update', { stop: x });
+      PG.notify('Stop for ' + row.symbol + ' set to ' + PG.num(x), 'success');
+      var warns = res && typeof res === 'object' ? res.risk_warnings : null;
+      if (Array.isArray(warns)) warns.forEach(function (w) { PG.notify('⚠ ' + w, 'error'); });
+      refreshPortfolio();
+    } catch (e) {
+      PG.notify('Stop update failed: ' + (e && e.message ? e.message : e), 'error');
     }
   }
 
@@ -254,6 +520,51 @@
     }
   }
 
+  /* ---------- plan defaults: fill stop / targets / note from the trade plan ---------- */
+
+  var AUTO_FIELDS = ['pStop', 'pT1', 'pT2', 'pNote'];
+  var planReq = 0;
+
+  function markManual(id) { $(id).dataset.auto = ''; }
+
+  function setAuto(id, value) {
+    var el = $(id);
+    // Never overwrite something the user typed themselves.
+    if (el.value !== '' && el.dataset.auto !== '1') return;
+    el.value = (value === null || value === undefined) ? '' : String(value);
+    el.dataset.auto = el.value === '' ? '' : '1';
+  }
+
+  async function fillPlanDefaults() {
+    var symbol = String($('pSymbol').value || '').replace(/^EGX:/i, '').trim().toUpperCase();
+    var hint = $('planHint');
+    if (!symbol) return;
+    var entryRaw = $('pEntry').value;
+    var entry = entryRaw === '' ? null : Number(entryRaw);
+    var seq = ++planReq;
+    hint.textContent = 'Loading ' + symbol + ' trade plan…';
+    try {
+      var d = await PG.api('get', '/api/portfolio/plan-defaults/' + encodeURIComponent(symbol)
+        + (entry !== null && isFinite(entry) ? '?entry=' + encodeURIComponent(entry) : ''));
+      if (seq !== planReq) return;  // a newer request superseded this one
+      setAuto('pStop', d.stop); setAuto('pT1', d.target1); setAuto('pT2', d.target2); setAuto('pNote', d.note);
+      var bits = [];
+      if (d.stop !== null && d.stop !== undefined) bits.push('stop ' + PG.num(d.stop) + ' (' + (d.source || 'plan') + ')');
+      if (d.target1 !== null && d.target1 !== undefined) bits.push('T1 ' + PG.num(d.target1));
+      if (d.target2 !== null && d.target2 !== undefined) bits.push('T2 ' + PG.num(d.target2));
+      if (d.score !== null && d.score !== undefined) bits.push('score ' + PG.num(d.score, 0));
+      if (d.signal) bits.push(String(d.signal));
+      if (d.current_price !== null && d.current_price !== undefined) bits.push('last ' + PG.num(d.current_price));
+      hint.textContent = symbol + ' trade plan: ' + (bits.length ? bits.join(' · ') : 'no levels available')
+        + (Array.isArray(d.warnings) && d.warnings.length ? ' — ' + d.warnings.join(' ') : '')
+        + '. You can overwrite any auto-filled field.';
+    } catch (e) {
+      if (seq !== planReq) return;
+      hint.textContent = 'Could not load a trade plan for ' + symbol + ' (' + (e && e.message ? e.message : e)
+        + '). Enter the stop yourself.';
+    }
+  }
+
   async function submitPosition(ev) {
     ev.preventDefault();
     var symbol = String($('pSymbol').value || '').replace(/^EGX:/i, '').trim().toUpperCase();
@@ -261,21 +572,29 @@
     var t1 = $('pT1').value === '' ? null : Number($('pT1').value);
     var t2 = $('pT2').value === '' ? null : Number($('pT2').value);
     var note = String($('pNote').value || '');
-    if (!note.trim()) {
-      PG.notify('A "why" note is required — record the setup, the scanner that flagged it, and the planned R:R. You will re-read it when you close.', 'error');
-      $('pNote').focus();
-      return;
-    }
+    var stopGiven = $('pStop').value !== '';
     if (!symbol) { PG.notify('Symbol is required', 'error'); return; }
     if (!isFinite(qty) || qty <= 0) { PG.notify('Qty must be a positive number', 'error'); return; }
     if (!isFinite(entry) || entry <= 0) { PG.notify('Entry must be a positive price', 'error'); return; }
-    if (!isFinite(stop) || stop <= 0) { PG.notify('Stop must be a positive price', 'error'); return; }
-    if (stop >= entry) { PG.notify('Stop must be below entry for a long position', 'error'); return; }
+    if (stopGiven && (!isFinite(stop) || stop <= 0)) { PG.notify('Stop must be a positive price', 'error'); return; }
+    var raisedStop = false;
+    if (stopGiven && stop >= entry) {
+      // Legitimate only for an EXISTING winner whose stop already sits above cost.
+      if (!window.confirm('Stop ' + stop + ' is at/above entry ' + entry + '.\n\n'
+        + 'Only continue if this is an EXISTING position whose stop you have ALREADY raised above cost. '
+        + 'The initial risk is unknown, so R multiples for this trade will show as unavailable.\n\n'
+        + 'For a NEW trade, press Cancel and enter a stop below your entry.')) {
+        return;
+      }
+      raisedStop = true;
+    }
     if (t1 !== null && (!isFinite(t1) || t1 <= 0)) { PG.notify('Target 1 must be a positive price', 'error'); return; }
     if (t2 !== null && (!isFinite(t2) || t2 <= 0)) { PG.notify('Target 2 must be a positive price', 'error'); return; }
     var btn = $('posBtn');
     btn.disabled = true;
-    var body = { symbol: symbol, qty: qty, entry: entry, stop: stop, target1: t1, target2: t2, note: note };
+    // Empty stop/targets/note → the backend fills them from the trade plan.
+    var body = { symbol: symbol, qty: qty, entry: entry, stop: stopGiven ? stop : null,
+                 target1: t1, target2: t2, note: note, raised_stop: raisedStop };
     try {
       var res;
       try {
@@ -294,7 +613,11 @@
           throw err;
         }
       }
-      PG.notify('Opened ' + PG.num(qty, 0) + ' × ' + symbol + ' @ ' + PG.num(entry), 'success');
+      PG.notify('Opened ' + PG.num(qty, 0) + ' × ' + symbol + ' @ ' + PG.num(entry)
+        + (res && res.stop !== undefined && res.stop !== null ? ' · stop ' + PG.num(res.stop) : ''), 'success');
+      if (res && Array.isArray(res.auto_filled) && res.auto_filled.length) {
+        PG.notify('Auto-filled from trade plan: ' + res.auto_filled.join(', '), 'info');
+      }
       var warns = res && typeof res === 'object' ? res.risk_warnings : null;
       if (Array.isArray(warns)) {
         warns.forEach(function (w) { PG.notify('⚠ ' + w, 'error'); });
@@ -518,13 +841,21 @@
   async function refreshPortfolio() {
     await loadPerformance();
     await loadPositions();
+    await loadGuardian();
   }
 
   function init() {
     PG.boot('portfolio');
     $('posForm').addEventListener('submit', submitPosition);
+    $('pSymbol').addEventListener('change', fillPlanDefaults);
+    $('pEntry').addEventListener('change', fillPlanDefaults);
+    AUTO_FIELDS.forEach(function (id) { $(id).addEventListener('input', function () { markManual(id); }); });
+    $('posForm').addEventListener('reset', function () {
+      AUTO_FIELDS.forEach(function (id) { $(id).dataset.auto = ''; });
+    });
     $('ruleForm').addEventListener('submit', submitRule);
     $('evalBtn').addEventListener('click', evaluateNow);
+    $('guardRunBtn').addEventListener('click', runGuardian);
     buildRuleTypePicker();
     refreshPortfolio();
     loadRules();

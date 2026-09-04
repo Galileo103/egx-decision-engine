@@ -300,7 +300,21 @@ window.PG = (function () {
   }
 
   function loading(target, label) { target.textContent = ''; target.appendChild(mk('div', { class: 'pg-loading' }, [label || 'Loading…'])); }
-  function errBox(target, msg) { target.textContent = ''; target.appendChild(mk('div', { class: 'pg-error' }, [String(msg || 'Request failed')])); }
+  function errBox(target, msg) {
+    var s = String(msg || 'Request failed');
+    var friendly = s;
+    if (/Upstream TradingView|transient errors|empty-body outage|scanner\.tradingview/i.test(s)) {
+      friendly = 'TradingView is pausing this app for a minute or two (rate limit). Try again shortly — stored results and Yahoo-based tabs (Leaders, Patterns) still work.';
+    } else if (/rate limit|429|backing off/i.test(s)) {
+      friendly = 'Yahoo is rate-limiting requests for a short while. Try again in a minute.';
+    } else if (/Failed to fetch|NetworkError|ECONNREFUSED/i.test(s)) {
+      friendly = "The app's server is not responding. Is it running?";
+    }
+    target.textContent = '';
+    var box = mk('div', { class: 'pg-error' }, [friendly]);
+    if (friendly !== s) box.title = s;
+    target.appendChild(box);
+  }
 
   function metricCard(label, valueNode) {
     var v = mk('div', { class: 'pg-card-value' });

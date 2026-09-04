@@ -270,8 +270,28 @@
     return el("div", { class: "loading-pill", text: msg || "Loading…" });
   }
 
+  /** Turn upstream/plumbing errors into a sentence a trader can act on. */
+  function friendlyError(msg) {
+    var s = String(msg || "Something went wrong.");
+    var label = /^([^:]{1,40}):\s/.exec(s);
+    var prefix = label ? label[1] + ": " : "";
+    if (/Upstream TradingView|transient errors|empty-body outage|scanner\.tradingview/i.test(s)) {
+      return prefix + "TradingView is pausing this app for a minute or two (rate limit). The chart, your position and patterns still work from Yahoo data. Reload in a minute for the score and trade plan.";
+    }
+    if (/rate limit|429|backing off/i.test(s)) {
+      return prefix + "Yahoo is rate-limiting requests for a short while. Cached data is shown where available; try again in a minute.";
+    }
+    if (/Failed to fetch|NetworkError|ECONNREFUSED|API offline/i.test(s)) {
+      return prefix + "The app's server is not responding. Is it running? (see the guide, section 1)";
+    }
+    return s;
+  }
+
   function errorBox(msg) {
-    return el("div", { class: "error-box", text: String(msg || "Something went wrong.") });
+    var friendly = friendlyError(msg);
+    var box = el("div", { class: "error-box", text: friendly });
+    if (friendly !== String(msg)) box.title = String(msg);   // the raw error stays one hover away
+    return box;
   }
 
   /**

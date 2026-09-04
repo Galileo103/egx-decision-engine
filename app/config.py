@@ -82,6 +82,14 @@ class Settings:
         # or filtered as illiquid.
         self.min_daily_value_egp: float = _env_float("MIN_DAILY_VALUE_EGP", 5_000_000.0)
 
+        # Position Guardian (exit verdicts for open positions).
+        # Chandelier trailing stop = highest close since entry - ATR_MULT x ATR14.
+        self.guardian_atr_mult: float = _env_float("GUARDIAN_ATR_MULT", 2.5)
+        # Composite-score drop (points) since entry that counts as "thesis broken".
+        self.guardian_score_drop: float = _env_float("GUARDIAN_SCORE_DROP", 15.0)
+        # Sessions held inside +/-0.5R before the time-stop advice fires.
+        self.guardian_time_stop_bars: int = _env_int("GUARDIAN_TIME_STOP_BARS", 15)
+
         # Ensure the database directory exists so sqlite can create the file.
         try:
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)

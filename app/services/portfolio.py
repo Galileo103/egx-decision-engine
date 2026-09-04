@@ -133,6 +133,167 @@ def size_position(
         return {"error": str(exc)}
 
 
+# ── plan defaults (stop / targets / note from the engine's own trade plan) ────
+
+
+def _find_num_key(obj: Any, names: tuple[str, ...], depth: int = 0) -> Optional[float]:
+    """Depth-limited search for the first numeric value under any of ``names``."""
+    if depth > 4 or not isinstance(obj, dict):
+        return None
+    for key, val in obj.items():
+        if str(key).lower() in names:
+            found = _to_float(val)
+            if found is not None:
+                return found
+    for val in obj.values():
+        if isinstance(val, dict):
+            found = _find_num_key(val, names, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _yahoo_atr(symbol: str) -> tuple[Optional[float], Optional[float]]:
+    """(14-day ATR, last close) from Yahoo daily candles — the fallback risk
+    anchor when TradingView is rate-limited. Either value may be None."""
+    try:
+        from app.services import guardian, history
+
+        hist = history.get_history(symbol, "3mo", "1d")
+        if not isinstance(hist, dict) or "error" in hist:
+            return None, None
+        candles = [c for c in (hist.get("candles") or []) if isinstance(c, dict)]
+        last_close = _to_float(candles[-1].get("close")) if candles else None
+        return guardian._atr(candles), last_close
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("yahoo ATR fallback failed for %s: %s", symbol, exc)
+        return None, None
+
+
+def _upstream_error(*sections: dict) -> Optional[str]:
+    """Message of the first {"error": ...} found in the given core-library sections."""
+    for section in sections:
+        err = section.get("error") if isinstance(section, dict) else None
+        if err:
+            return str(err.get("message") or err) if isinstance(err, dict) else str(err)
+    return None
+
+
+def plan_defaults(symbol: str, entry: Optional[float] = None) -> dict:
+    """Stop / targets / note for a new position, taken from the stock page's
+    own trade plan so the user only has to type symbol, quantity and fill.
+
+    Returns {"stop", "target1", "target2", "note", "score", "signal",
+    "source", "warnings", "plan"} — any level the engine cannot supply is
+    None and explained in ``warnings`` rather than invented.
+    """
+    try:
+        from app.services import stocks
+
+        bare = str(symbol or "").upper().strip().split(":")[-1]
+        if not bare:
+            return {"error": "symbol is required"}
+        entry_f = _to_float(entry)
+        detail = stocks.detail(bare)
+        if not isinstance(detail, dict) or "error" in detail:
+            return {"error": f"stock detail unavailable for {bare}: "
+                             f"{(detail or {}).get('error', 'unknown')}"}
+        analysis: dict = detail.get("analysis") or {}
+        if not isinstance(analysis, dict):
+            analysis = {}
+        plan: dict = detail.get("trade_plan") or {}
+        if not isinstance(plan, dict):
+            plan = {}
+        levels = stocks._plan_levels(plan)
+        warnings: list[str] = []
+
+        price_data = analysis.get("price_data")
+        price = _to_float(price_data.get("current_price")) if isinstance(price_data, dict) else None
+        upstream = _upstream_error(analysis, plan)
+        if upstream:
+            warnings.append(
+                "TradingView analysis is unavailable right now (usually a 1-2 minute "
+                f"rate-limit pause): {upstream[:140]}. Stop falls back to a Yahoo ATR; "
+                "retry in a minute for the full plan (score, targets)."
+            )
+        yahoo_atr: Optional[float] = None
+        if price is None or upstream:
+            yahoo_atr, last_close = _yahoo_atr(bare)
+            if price is None:
+                price = last_close
+        ref = entry_f or price
+        stop = levels.get("stop")
+        source = "trade plan"
+        if stop is not None and ref is not None and stop >= ref:
+            warnings.append(
+                f"The plan's stop {stop:.2f} is not below your entry {ref:.2f} — "
+                "falling back to entry minus 2×ATR."
+            )
+            stop = None
+        if stop is None and ref is not None:
+            atr = _find_num_key(analysis, ("atr", "atr14", "atr_14"))
+            atr_source = "TradingView ATR"
+            if not atr or atr <= 0:
+                if yahoo_atr is None:
+                    yahoo_atr, _ = _yahoo_atr(bare)
+                atr, atr_source = yahoo_atr, "Yahoo 14-day ATR"
+            if atr and atr > 0:
+                stop = round(ref - 2.0 * atr, 2)
+                source = f"entry − 2×{atr_source}"
+            else:
+                warnings.append("No stop available: the trade plan has none below your entry "
+                                "and no ATR could be computed — enter the stop yourself.")
+        t1, t2 = levels.get("t1"), levels.get("t2")
+        if ref is not None:
+            if t1 is not None and t1 <= ref:
+                warnings.append(f"Plan target 1 ({t1:.2f}) is not above your entry — left empty.")
+                t1 = None
+            if t2 is not None and t2 <= ref:
+                warnings.append(f"Plan target 2 ({t2:.2f}) is not above your entry — left empty.")
+                t2 = None
+
+        score = _to_float(analysis.get("stock_score"))
+        signal = analysis.get("signal") or analysis.get("recommendation")
+        if not isinstance(signal, str):
+            signal = None
+        setup = plan.get("trade_setup")
+        scenario = setup.get("primary_scenario") if isinstance(setup, dict) else None
+        rr = None
+        if ref is not None and stop is not None and t2 is not None and ref > stop:
+            rr = round((t2 - ref) / (ref - stop), 2)
+        parts = [f"Auto-filled from the {bare} trade plan"]
+        if scenario:
+            parts.append(f"scenario {scenario}")
+        if score is not None:
+            parts.append(f"score {score:.0f}")
+        if signal:
+            parts.append(f"signal {signal}")
+        if rr is not None:
+            parts.append(f"planned R:R {rr:.1f} to T2")
+        note = " · ".join(parts) + "."
+        checks = detail.get("plan_checks") if isinstance(detail.get("plan_checks"), list) else []
+        warnings.extend(str(c) for c in checks[:3])
+        return {
+            "symbol": bare,
+            "entry": ref,
+            "current_price": price,
+            "stop": stop,
+            "target1": t1,
+            "target2": t2,
+            "note": note,
+            "score": score,
+            "signal": signal,
+            "source": source,
+            "warnings": warnings,
+            "plan": {
+                "score": score, "signal": signal, "scenario": scenario,
+                "levels": levels, "as_of": detail.get("as_of"),
+            },
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 # ── lifecycle ────────────────────────────────────────────────────────────────
 
 
@@ -157,14 +318,19 @@ def open_position(
     symbol: str,
     qty: float,
     entry: float,
-    stop: float,
+    stop: Optional[float] = None,
     target1: Optional[float] = None,
     target2: Optional[float] = None,
     plan: Optional[dict] = None,
     note: str = "",
     allow_override: bool = False,
+    raised_stop: bool = False,
 ) -> dict:
     """Insert a new open (long) position; returns the stored row.
+
+    ``stop`` may be omitted: the stop, any missing target, and an empty note
+    are then filled from the engine's own trade plan (``plan_defaults``) and
+    the plan is stored on the row so the guardian knows the score at entry.
 
     Risk is checked at the point of commitment, not just in the sizer:
     - a required "why" note (journaling — setup, scanner, plan),
@@ -172,6 +338,11 @@ def open_position(
     - a hard block when total open heat would exceed MAX_OPEN_HEAT_PCT of
       ACCOUNT_SIZE — overridable only by an explicit ``allow_override``,
     - a sector-concentration warning at ≥2 open positions in the same sector.
+
+    ``raised_stop=True`` admits a stop at/above entry — an EXISTING winner
+    being recorded after its stop was already moved above cost. The initial
+    risk is then unknown, so ``initial_stop`` is stored NULL and R-multiples
+    for that trade stay unavailable rather than being invented.
     """
     try:
         symbol = str(symbol or "").upper().strip()
@@ -179,17 +350,49 @@ def open_position(
             return {"error": "symbol is required"}
         qty = float(qty)
         entry = float(entry)
-        stop = float(stop)
         if qty <= 0:
             return {"error": "qty must be > 0"}
         if entry <= 0:
             return {"error": "entry must be > 0"}
+        auto_filled: list[str] = []
+        # Consult the trade plan only when the user relies on it (no stop or no
+        # note). A fully specified entry must never trigger a network call.
+        if stop is None or not (note or "").strip():
+            defaults = plan_defaults(symbol, entry)
+            if "error" in defaults:
+                if stop is None:
+                    return {"error": f"stop is required — could not auto-fill it: {defaults['error']}"}
+            else:
+                d_stop, d_t1, d_t2 = defaults.get("stop"), defaults.get("target1"), defaults.get("target2")
+                if stop is None and d_stop is not None:
+                    stop = float(d_stop)
+                    auto_filled.append(f"stop {stop:.2f} ({defaults.get('source')})")
+                if target1 is None and d_t1 is not None:
+                    target1 = float(d_t1)
+                    auto_filled.append(f"target1 {target1:.2f}")
+                if target2 is None and d_t2 is not None:
+                    target2 = float(d_t2)
+                    auto_filled.append(f"target2 {target2:.2f}")
+                if not (note or "").strip() and defaults.get("note"):
+                    note = str(defaults["note"])
+                    auto_filled.append("note")
+                if plan is None and isinstance(defaults.get("plan"), dict):
+                    plan = defaults["plan"]
+        if stop is None:
+            return {"error": "stop is required — the trade plan offers no stop below your entry; "
+                             "enter one yourself."}
+        stop = float(stop)
         if stop < 0:
             return {"error": "stop cannot be negative"}
-        if stop >= entry:
+        if stop >= entry and not raised_stop:
             # Positions are stored as side='long'; a stop at/above entry flips
             # the sign of r_multiple and understates open_risk downstream.
-            return {"error": "stop must be below entry for a long position"}
+            return {
+                "error": "stop must be below entry for a long position — for an "
+                         "existing winner whose stop is already above cost, resubmit "
+                         "with raised_stop=true (R multiples will be unavailable).",
+            }
+        initial_stop: Optional[float] = stop if stop < entry else None
         if not (note or "").strip():
             return {
                 "error": "note is required — record WHY you are taking this trade "
@@ -198,8 +401,14 @@ def open_position(
             }
 
         account = float(settings.account_size) or 0.0
-        new_risk = (entry - stop) * qty
+        new_risk = max(0.0, entry - stop) * qty
         warnings: list[str] = []
+        if initial_stop is None:
+            warnings.append(
+                f"Stop {stop:.2f} is at/above entry {entry:.2f}: initial risk unknown, so "
+                "R multiples for this trade will show as unavailable. The guardian still "
+                "watches the stop."
+            )
         if account > 0:
             new_risk_pct = new_risk / account * 100.0
             existing_risk = 0.0
@@ -236,6 +445,16 @@ def open_position(
                     f"(> {WARN_TRADE_RISK_PCT:.0f}% guideline)."
                 )
 
+        already_open = [p for p in list_positions("open") if p.get("symbol") == symbol]
+        if already_open:
+            held = sum(_to_float(p.get("qty")) or 0.0 for p in already_open)
+            warnings.append(
+                f"You already hold {held:g} {symbol} in {len(already_open)} open position(s) "
+                f"(#{', #'.join(str(p['id']) for p in already_open)}). If this is the same "
+                "holding, use '+ Buy' on that row instead — a second row double-counts it. "
+                "Use 'Remove' to delete a row entered by mistake."
+            )
+
         sector = _sector_of(symbol)
         if sector:
             same_sector = [
@@ -251,20 +470,30 @@ def open_position(
 
         position_id = db.execute(
             "INSERT INTO positions "
-            "(symbol, side, qty, entry, stop, target1, target2, opened_at, plan_json, note, status) "
-            "VALUES (?, 'long', ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
+            "(symbol, side, qty, entry, stop, initial_stop, target1, target2, opened_at, "
+            " plan_json, note, status) "
+            "VALUES (?, 'long', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
             (
-                symbol, qty, entry, stop,
+                symbol, qty, entry, stop, initial_stop,
                 _to_float(target1), _to_float(target2),
                 _now_iso(),
                 json.dumps(plan) if plan else None,
                 note or "",
             ),
         )
+        try:  # journal the opening buy so the fill history is complete
+            _record_fill(position_id, "buy", qty, entry,
+                         round(qty * entry * settings.fee_pct_per_side / 100.0, 2),
+                         None, entry, qty, "open")
+        except Exception as exc:  # noqa: BLE001 — journaling must never fail the open
+            logger.warning("could not journal opening fill: %s", exc)
         rows = db.query("SELECT * FROM positions WHERE id = ?", (position_id,))
         result = rows[0] if rows else {"id": position_id, "symbol": symbol, "status": "open"}
+        result["plan"] = _parse_plan(result)
         if warnings:
             result["risk_warnings"] = warnings
+        if auto_filled:
+            result["auto_filled"] = auto_filled
         return result
     except Exception as exc:
         return {"error": str(exc)}
@@ -294,8 +523,8 @@ def close_position(
 
         entry = float(pos["entry"])
         qty = float(pos["qty"])
-        stop = _to_float(pos.get("stop"))
         direction = -1.0 if (pos.get("side") or "long") == "short" else 1.0
+        per_share_risk = _risk_per_share(pos)
 
         pnl_gross = round((exit_price - entry) * qty * direction, 2)
         # Fees are computed at the configured rate and STORED on the row, so
@@ -304,8 +533,8 @@ def close_position(
         pnl = round(pnl_gross - fees, 2)
         pnl_pct = round(pnl / (entry * qty) * 100.0, 2) if entry and qty else None
         r_multiple: Optional[float] = None
-        if stop is not None and entry - stop != 0 and qty:
-            r_multiple = round((pnl / qty) / ((entry - stop) * direction), 2)
+        if per_share_risk and qty:
+            r_multiple = round((pnl / qty) / per_share_risk, 2)
 
         closed_at = _now_iso()
         db.execute(
@@ -324,6 +553,250 @@ def close_position(
             "r_multiple": r_multiple,  # net R
             "entry_note": pos.get("note") or "",  # what you said at entry
         })
+        return result
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def _record_fill(position_id: int, side: str, qty: float, price: float, fees: float,
+                 realized: Optional[float], entry_after: float, qty_after: float,
+                 note: str = "") -> None:
+    db.execute(
+        "INSERT INTO position_fills (position_id, ts, side, qty, price, fees, realized_pnl, "
+        " entry_after, qty_after, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (position_id, _now_iso(), side, qty, price, fees, realized, entry_after, qty_after, note),
+    )
+
+
+def adjust_position(position_id: int, qty_delta: float, price: float, note: str = "") -> dict:
+    """Buy more (``qty_delta`` > 0) or sell part (``qty_delta`` < 0) of an open position.
+
+    - A buy blends the average entry: (old_qty × old_entry + Δ × price) / new_qty.
+      The stop, targets and ``initial_stop`` are untouched; heat is re-checked
+      and warned about (not blocked — the shares are already bought).
+    - A sell realizes PnL on the sold shares, net of round-trip fees at the
+      blended entry, and leaves the average entry unchanged. Selling the whole
+      remaining quantity closes the position via ``close_position``.
+    Every fill is journaled in ``position_fills``.
+    """
+    try:
+        qty_delta = float(qty_delta)
+        price = float(price)
+        if qty_delta == 0:
+            return {"error": "qty_delta must be non-zero (positive = buy, negative = sell)"}
+        if price <= 0:
+            return {"error": "price must be > 0"}
+        rows = db.query("SELECT * FROM positions WHERE id = ?", (position_id,))
+        if not rows:
+            return {"error": f"position {position_id} not found"}
+        pos = rows[0]
+        if pos.get("status") != "open":
+            return {"error": f"position {position_id} is not open"}
+        old_qty = float(pos["qty"])
+        old_entry = float(pos["entry"])
+        warnings: list[str] = []
+
+        if qty_delta > 0:
+            new_qty = old_qty + qty_delta
+            new_entry = round((old_qty * old_entry + qty_delta * price) / new_qty, 4)
+            fees = round(qty_delta * price * settings.fee_pct_per_side / 100.0, 2)
+            db.execute("UPDATE positions SET qty = ?, entry = ? WHERE id = ?",
+                       (new_qty, new_entry, position_id))
+            _record_fill(position_id, "buy", qty_delta, price, fees, None, new_entry, new_qty, note)
+            stop = _to_float(pos.get("stop"))
+            if price < old_entry:
+                warnings.append(
+                    f"Averaging DOWN: bought at {price:.2f} below your {old_entry:.2f} average. "
+                    "Adding to a loser is the most expensive habit in trading — make sure the "
+                    "setup, not the price, is the reason."
+                )
+            account = float(settings.account_size) or 0.0
+            if stop is not None and account > 0:
+                pos_risk = max(0.0, new_entry - stop) * new_qty
+                others = 0.0
+                for p in list_positions("open"):
+                    if p["id"] == position_id:
+                        continue
+                    p_stop = _to_float(p.get("stop"))
+                    if p_stop is not None:
+                        others += max(0.0, float(p["entry"]) - p_stop) * float(p["qty"])
+                heat = (others + pos_risk) / account * 100.0
+                if heat > MAX_OPEN_HEAT_PCT:
+                    warnings.append(
+                        f"Open heat is now {heat:.1f}% of the account — above the "
+                        f"{MAX_OPEN_HEAT_PCT:.0f}% cap. Consider trimming somewhere."
+                    )
+            result = db.query("SELECT * FROM positions WHERE id = ?", (position_id,))[0]
+            result["plan"] = _parse_plan(result)
+            result["fill"] = {"side": "buy", "qty": qty_delta, "price": price, "fees": fees,
+                              "entry_before": old_entry, "entry_after": new_entry,
+                              "qty_before": old_qty, "qty_after": new_qty}
+            if warnings:
+                result["risk_warnings"] = warnings
+            return result
+
+        sell_qty = -qty_delta
+        if sell_qty > old_qty + 1e-9:
+            return {"error": f"cannot sell {sell_qty:g} shares — only {old_qty:g} held"}
+        if abs(sell_qty - old_qty) < 1e-9:
+            closed = close_position(position_id, price)
+            if "error" not in closed:
+                closed["fill"] = {"side": "sell", "qty": sell_qty, "price": price,
+                                  "closed_position": True}
+            return closed
+        fees = _round_trip_fees(old_entry, price, sell_qty)
+        realized = round((price - old_entry) * sell_qty - fees, 2)
+        new_qty = old_qty - sell_qty
+        db.execute("UPDATE positions SET qty = ? WHERE id = ?", (new_qty, position_id))
+        _record_fill(position_id, "sell", sell_qty, price, fees, realized, old_entry, new_qty, note)
+        per_share_risk = _risk_per_share(pos)
+        r_part = round((realized / sell_qty) / per_share_risk, 2) if per_share_risk else None
+        result = db.query("SELECT * FROM positions WHERE id = ?", (position_id,))[0]
+        result["plan"] = _parse_plan(result)
+        result["fill"] = {"side": "sell", "qty": sell_qty, "price": price, "fees": fees,
+                          "realized_pnl": realized, "r_multiple": r_part,
+                          "qty_before": old_qty, "qty_after": new_qty}
+        return result
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def delete_position(position_id: int) -> dict:
+    """Erase a position record entered by mistake (duplicate, typo), with its
+    fills and guardian verdicts. This is NOT a sale — nothing is realized.
+    Use close_position / adjust_position for real exits."""
+    try:
+        rows = db.query("SELECT * FROM positions WHERE id = ?", (position_id,))
+        if not rows:
+            return {"error": f"position {position_id} not found"}
+        pos = rows[0]
+        sells = db.query(
+            "SELECT COUNT(*) AS n FROM position_fills WHERE position_id = ? AND side = 'sell'",
+            (position_id,),
+        )
+        if sells and int(sells[0]["n"] or 0) > 0:
+            return {"error": "this position has partial sales journaled — removing it would erase "
+                             "realized PnL. Close it instead, or remove the fills first."}
+        db.execute("DELETE FROM position_fills WHERE position_id = ?", (position_id,))
+        db.execute("DELETE FROM guardian_verdicts WHERE position_id = ?", (position_id,))
+        deleted = db.execute_rowcount("DELETE FROM positions WHERE id = ?", (position_id,))
+        if not deleted:
+            return {"error": f"position {position_id} could not be deleted"}
+        return {"ok": True, "deleted": {"id": position_id, "symbol": pos.get("symbol"),
+                                        "qty": pos.get("qty"), "entry": pos.get("entry"),
+                                        "status": pos.get("status")}}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def position_fills(position_id: Optional[int] = None, limit: int = 200) -> list[dict]:
+    """Fill journal, newest first (optionally for one position)."""
+    try:
+        limit = max(1, min(int(limit), 1000))
+        if position_id is not None:
+            return db.query(
+                "SELECT * FROM position_fills WHERE position_id = ? ORDER BY id DESC LIMIT ?",
+                (position_id, limit),
+            )
+        return db.query("SELECT * FROM position_fills ORDER BY id DESC LIMIT ?", (limit,))
+    except Exception as exc:
+        logger.error("position_fills failed: %s", exc)
+        return []
+
+
+def _partial_sales() -> tuple[float, float, int]:
+    """(net realized, fees, count) from partial sells journaled in position_fills."""
+    try:
+        rows = db.query(
+            "SELECT COALESCE(SUM(realized_pnl), 0) AS pnl, COALESCE(SUM(fees), 0) AS fees, "
+            "COUNT(*) AS n FROM position_fills WHERE side = 'sell'"
+        )
+        if rows:
+            return (float(rows[0]["pnl"] or 0.0), float(rows[0]["fees"] or 0.0), int(rows[0]["n"] or 0))
+    except Exception as exc:
+        logger.warning("partial sales aggregate failed: %s", exc)
+    return (0.0, 0.0, 0)
+
+
+def _risk_per_share(pos: dict) -> Optional[float]:
+    """Initial risk per share (entry minus the stop AT ENTRY), or None.
+
+    Uses ``initial_stop`` when recorded, else the current stop for rows that
+    predate the column. A stop at/above entry (raised winner, or unknown
+    initial risk) yields None: R is then unavailable, never fabricated.
+    """
+    entry = _to_float(pos.get("entry"))
+    direction = -1.0 if (pos.get("side") or "long") == "short" else 1.0
+    stop = _to_float(pos.get("initial_stop"))
+    if stop is None:
+        stop = _to_float(pos.get("stop"))
+    if entry is None or stop is None:
+        return None
+    risk = (entry - stop) * direction
+    return risk if risk > 0 else None
+
+
+def update_position(
+    position_id: int,
+    stop: Optional[float] = None,
+    target1: Optional[float] = None,
+    target2: Optional[float] = None,
+    note: Optional[str] = None,
+) -> dict:
+    """Adjust the CURRENT stop / targets / note of an open position.
+
+    This is how a guardian TIGHTEN_STOP suggestion is acted on. The stop may
+    sit at or above entry (locking in profit); ``initial_stop`` is never
+    touched, so R-multiples keep measuring against the risk you took at entry.
+    Passing a field as None leaves it unchanged.
+    """
+    try:
+        rows = db.query("SELECT * FROM positions WHERE id = ?", (position_id,))
+        if not rows:
+            return {"error": f"position {position_id} not found"}
+        pos = rows[0]
+        if pos.get("status") != "open":
+            return {"error": f"position {position_id} is not open"}
+        sets: list[str] = []
+        params: list[Any] = []
+        warnings: list[str] = []
+        entry = float(pos["entry"])
+        if stop is not None:
+            stop = float(stop)
+            if stop <= 0:
+                return {"error": "stop must be > 0"}
+            sets.append("stop = ?")
+            params.append(stop)
+            old_stop = _to_float(pos.get("stop"))
+            if old_stop is not None and stop < old_stop:
+                warnings.append(
+                    f"Stop LOWERED from {old_stop:.2f} to {stop:.2f}. Widening a stop after "
+                    "entry is the classic way a small loss becomes a large one — make sure "
+                    "this is a plan, not a hope."
+                )
+            if stop >= entry:
+                warnings.append(
+                    f"Stop {stop:.2f} is at/above entry {entry:.2f}: the trade is now "
+                    "risk-free (before fees/gaps)."
+                )
+        for col, val in (("target1", target1), ("target2", target2)):
+            if val is not None:
+                val = float(val)
+                if val <= 0:
+                    return {"error": f"{col} must be > 0"}
+                sets.append(f"{col} = ?")
+                params.append(val)
+        if note is not None:
+            sets.append("note = ?")
+            params.append(str(note))
+        if not sets:
+            return {"error": "nothing to update"}
+        params.append(position_id)
+        db.execute(f"UPDATE positions SET {', '.join(sets)} WHERE id = ?", params)  # noqa: S608
+        result = db.query("SELECT * FROM positions WHERE id = ?", (position_id,))[0]
+        result["plan"] = _parse_plan(result)
+        if warnings:
+            result["risk_warnings"] = warnings
         return result
     except Exception as exc:
         return {"error": str(exc)}
@@ -394,9 +867,9 @@ def _closed_stats(closed: list[dict]) -> dict:
         fees_total += fees
         if net > 0:
             wins += 1
-        stop = _to_float(pos.get("stop"))
-        if stop is not None and entry - stop != 0 and qty:
-            r_net = (net / qty) / ((entry - stop) * direction)
+        per_share_risk = _risk_per_share(pos)
+        if per_share_risk and qty:
+            r_net = (net / qty) / per_share_risk
             r_values.append(r_net)
             followed = pos.get("plan_followed")
             if followed in (1, True):
@@ -563,14 +1036,20 @@ def performance() -> dict:
             })
 
         stats = _closed_stats(closed_positions)
+        partial_pnl, partial_fees, partial_n = _partial_sales()
+        realized_total = round(stats["realized_pnl"] + partial_pnl, 2)
         return {
             "open_positions": open_rows,
             "open_count": len(open_rows),
             "closed_count": len(closed_positions),
             "unrealized_pnl": round(unrealized_total, 2),
-            "realized_pnl": stats["realized_pnl"],
-            "realized_pnl_gross": stats["realized_pnl_gross"],
-            "fees_paid": stats["fees_paid"],
+            # Closed positions PLUS partial sales journaled in position_fills.
+            "realized_pnl": realized_total,
+            "realized_pnl_closed": stats["realized_pnl"],
+            "realized_pnl_partial_sales": round(partial_pnl, 2),
+            "partial_sales_count": partial_n,
+            "realized_pnl_gross": round(stats["realized_pnl_gross"] + partial_pnl + partial_fees, 2),
+            "fees_paid": round(stats["fees_paid"] + partial_fees, 2),
             "win_rate": stats["win_rate"],
             "avg_r": stats["avg_r"],
             "avg_r_plan_followed": stats["avg_r_plan_followed"],
@@ -587,7 +1066,7 @@ def performance() -> dict:
                 f"All PnL, win rate and R figures are NET of {settings.fee_pct_per_side}%/side "
                 "transaction costs; gross figures carry a _gross suffix."
             ),
-            **_benchmark_fields(stats["realized_pnl"] + round(unrealized_total, 2)),
+            **_benchmark_fields(realized_total + round(unrealized_total, 2)),
             "as_of": _now_iso(),
         }
     except Exception as exc:

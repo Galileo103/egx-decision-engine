@@ -131,9 +131,12 @@ class TestPositionMath:
 # ── risk guardrails ──────────────────────────────────────────────────────────
 
 class TestRiskGuardrails:
-    def test_note_is_required(self) -> None:
-        from app.services import portfolio
+    def test_note_is_required(self, monkeypatch) -> None:
+        """An empty note is normally auto-filled from the trade plan; when no
+        plan is available the journaling requirement still bites."""
+        from app.services import portfolio, stocks
 
+        monkeypatch.setattr(stocks, "detail", lambda s, tf="1D": {"error": "offline"})
         r = portfolio.open_position("COMI", 10, 50.0, 48.0, note="   ")
         assert "error" in r and "note is required" in r["error"]
 

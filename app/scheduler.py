@@ -145,7 +145,11 @@ def _job_intraday() -> dict:
         return skip
     from app.services import alerts
 
-    return alerts.evaluate_all()
+    out: dict[str, Any] = {"alerts": alerts.evaluate_all()}
+    # Stop/target breaches should not wait for 15:00; the per-(position,
+    # verdict, date) dedupe means a standing breach pings once, not 27 times.
+    out["guardian"] = _guardian_stage()
+    return out
 
 
 #: Serializes the post-close pipeline. max_instances=1 only guards a job
@@ -198,7 +202,83 @@ def _post_close_body() -> dict:
         out["alerts"] = alerts.evaluate_all()
     except Exception as exc:
         out["alerts"] = {"error": str(exc)}
+    # Runs AFTER the snapshot so the thesis check sees today's score/signal.
+    out["guardian"] = _guardian_stage()
+    # Grade older scanner hits against what happened next (needs today's bars).
+    try:
+        from app.services import scorecard
+
+        out["scorecard"] = scorecard.grade()
+    except Exception as exc:
+        out["scorecard"] = {"error": str(exc)}
+    # Relative-strength ranking, persisted so the screener reads it instantly.
+    try:
+        from app.services import leaders
+
+        result = leaders.compute("EGX100", limit=40, persist=True)
+        if isinstance(result, dict) and "error" not in result:
+            out["leaders"] = {k: result.get(k) for k in
+                              ("ranked", "scanned", "skipped_no_data", "filtered_illiquid",
+                               "benchmark", "elapsed_s")}
+            out["leaders"]["top5"] = [r["symbol"] for r in (result.get("rows") or [])[:5]]
+        else:
+            out["leaders"] = result
+    except Exception as exc:
+        out["leaders"] = {"error": str(exc)}
+    # Chart patterns (same cached candles as leaders); confirmed ones become
+    # scanner hits so the Scorecard grades them.
+    try:
+        from app.services import patterns
+
+        result = patterns.compute("EGX100", persist=True)
+        if isinstance(result, dict) and "error" not in result:
+            out["patterns"] = {k: result.get(k) for k in
+                               ("found", "confirmed", "forming", "scanned", "skipped_no_data", "elapsed_s")}
+            out["patterns"]["confirmed_symbols"] = [
+                f"{r['symbol']}:{r['pattern']}" for r in (result.get("rows") or [])
+                if r.get("status") == "confirmed"
+            ][:10]
+        else:
+            out["patterns"] = result
+    except Exception as exc:
+        out["patterns"] = {"error": str(exc)}
+    # Best setups: the checklist across candidates + leaders + watchlist + holdings
+    # (runs last so it sees today's candidates, leaders and patterns).
+    try:
+        from app.services import setups
+
+        result = setups.compute(persist=True)
+        if isinstance(result, dict) and "error" not in result:
+            out["setups"] = {k: result.get(k) for k in ("scanned", "errors", "counts", "elapsed_s")}
+            out["setups"]["top"] = [f"{r['symbol']} {r['score']}/6" for r in (result.get("rows") or [])
+                                    if r.get("verdict") == "setup"][:8]
+        else:
+            out["setups"] = result
+    except Exception as exc:
+        out["setups"] = {"error": str(exc)}
     return out
+
+
+def _guardian_stage() -> dict:
+    """Position Guardian: exit verdicts for open positions, persisted + pushed.
+
+    Returns a compact summary (the full verdict list lives in
+    guardian_verdicts / GET /api/portfolio/guardian), keeping job_runs.detail
+    readable.
+    """
+    try:
+        from app.services import guardian
+
+        result = guardian.evaluate(persist=True, notify=True)
+        if isinstance(result, dict) and "error" not in result:
+            summary = dict(result.get("summary") or {})
+            summary["verdicts"] = {
+                str(r.get("symbol")): r.get("verdict") for r in result.get("verdicts") or []
+            }
+            return summary
+        return result
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 def _job_morning_brief() -> dict:

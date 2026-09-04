@@ -19,6 +19,10 @@
       <div class="pg-tabs" role="tablist">
         <button type="button" class="pg-tab active" id="tabScanner">Scanner</button>
         <button type="button" class="pg-tab" id="tabCandidates">Candidates</button>
+        <button type="button" class="pg-tab" id="tabSetups">Setups</button>
+        <button type="button" class="pg-tab" id="tabLeaders">Leaders</button>
+        <button type="button" class="pg-tab" id="tabPatterns">Patterns</button>
+        <button type="button" class="pg-tab" id="tabScorecard">Scorecard</button>
       </div>
 
       <section id="scannerSection" class="pg-panel">
@@ -36,6 +40,46 @@
       <section id="resultsSection" class="pg-panel">
         <h2>Results</h2>
         <div id="resultsBox"><div class="pg-muted" style="font-size:13px">Pick a scanner and press Run. Click a column header to sort; click a row to open the stock page.</div></div>
+      </section>
+
+      <section id="setupsSection" class="pg-panel" style="display:none">
+        <h2>Best setups — the six-pillar checklist across today's candidates</h2>
+        <div class="pg-muted" style="font-size:12px;margin-bottom:10px">
+          Every stock the app already has a reason to look at (Candidates, Leaders, your watchlist, your holdings) is scored on
+          Trend, Support/Resistance, Volume, Price action, Patterns and Risk plan. <b>SETUP</b> = 5-6 ticks and nothing against it.
+          <b>WATCH</b> = worth following, something unclear. <b>NO SETUP</b> = the trend or the risk plan is against it. Runs after each close.
+        </div>
+        <div id="setupsBox"></div>
+      </section>
+
+      <section id="leadersSection" class="pg-panel" style="display:none">
+        <h2>Leaders — relative strength vs EGX30</h2>
+        <div class="pg-muted" style="font-size:12px;margin-bottom:10px">
+          Stocks beating the index over 1, 3 and 6 months, still near their 52-week high, above the 50-day average and
+          liquid enough to exit. Computed after each close from Yahoo daily candles; <b>Refresh</b> recomputes now (about a minute).
+        </div>
+        <div id="leadersBox"></div>
+      </section>
+
+      <section id="patternsSection" class="pg-panel" style="display:none">
+        <h2>Patterns — reversal, triangles, continuation, wedges, channels, candlesticks, price action</h2>
+        <div class="pg-muted" style="font-size:12px;margin-bottom:10px">
+          Every pattern carries its <b>category</b>, <b>direction</b>, <b>kind</b> (reversal / continuation / indecision / structure),
+          a <b>reliability</b> and <b>frequency</b> tier from the classic references, and — as it accumulates — the app's own EGX hit rate
+          from the Scorecard. <b>Confirmed</b> = the trigger line was broken (or the candle/event completed) recently;
+          <b>Forming</b> = shape complete, not yet broken. A finder, not a judge: the break with volume is what matters.
+        </div>
+        <div id="patternsBox"></div>
+      </section>
+
+      <section id="scorecardSection" class="pg-panel" style="display:none">
+        <h2>Signal Scorecard — which scanners actually work</h2>
+        <div class="pg-muted" style="font-size:12px;margin-bottom:10px">
+          Every scanner hit is graded by what the stock did 5, 10 and 20 sessions later, against EGX30 over the same window.
+          A scanner's beat rate becomes its weight in the Candidates ranking — only after 20 graded hits, because a 60% hit
+          rate on 5 trades is noise. Hits accumulate one day at a time from the post-close job.
+        </div>
+        <div id="scorecardBox"></div>
       </section>
 
       <section id="candidatesSection" class="pg-panel" style="display:none">
@@ -198,20 +242,440 @@
     }
   }
 
+  /* ---------- best setups ---------- */
+
+  var setupsLoaded = false;
+  var PILLAR_KEYS = ['trend', 'support_resistance', 'volume', 'price_action', 'patterns', 'risk'];
+  var PILLAR_LABEL = { trend: 'Trend', support_resistance: 'S/R', volume: 'Volume', price_action: 'Price action', patterns: 'Patterns', risk: 'Risk plan' };
+  var PILLAR_ICON = { pass: '\u2713', warn: '\u26A0', fail: '\u2717' };
+  var PILLAR_CLASS = { pass: 'up', warn: 'neutral', fail: 'down' };
+
+  function pillarCell(r, key) {
+    var st = (r.pillars || {})[key] || 'warn';
+    var txt = (r.pillar_text || {})[key] || '';
+    return PG.mk('span', { class: 'badge ' + (PILLAR_CLASS[st] || 'neutral'), title: PILLAR_LABEL[key] + ' — ' + txt, style: 'cursor:help' }, [PILLAR_ICON[st] || '?']);
+  }
+
+  function renderSetups(payload, box, live) {
+    box.innerHTML = '';
+    var rows = Array.isArray(payload.rows) ? payload.rows : [];
+    var head = PG.mk('div', { class: 'pg-form', style: 'margin-bottom:10px;align-items:center' });
+    var c = payload.counts || {};
+    head.appendChild(PG.mk('div', { class: 'pg-muted pg-asof', style: 'margin:0;flex:1' },
+      [rows.length + ' stocks scored · ' + (c.setup || 0) + ' setups · ' + (c.watch || 0) + ' watch · ' + (c.no_setup || 0) + ' no setup'
+        + (payload.date ? ' · checklist of ' + payload.date : '') + (live ? ' · run just now' : (payload.stored ? ' · stored by the post-close job' : ''))]));
+    var run = PG.mk('button', { type: 'button', class: 'pg-btn secondary' }, ['Run now (≈1 min)']);
+    run.addEventListener('click', refreshSetups);
+    head.appendChild(run);
+    box.appendChild(head);
+    if (!rows.length) {
+      box.appendChild(PG.mk('div', { class: 'pg-muted' }, ['No checklist run stored yet. The post-close job builds it every trading day at 15:00, or press Run now.']));
+      return;
+    }
+    var cols = [
+      { key: 'symbol', label: 'Symbol', numeric: false, render: function (r) { return PG.mk('span', { style: 'font-weight:600' }, [String(r.symbol)]); } },
+      { key: 'verdict', label: 'Verdict', numeric: false, render: function (r) {
+        var v = r.verdict === 'setup' ? 'SETUP' : (r.verdict === 'no_setup' ? 'NO SETUP' : 'WATCH');
+        return PG.mk('span', { class: 'badge ' + (r.verdict === 'setup' ? 'up' : (r.verdict === 'no_setup' ? 'down' : 'neutral')) }, [v]);
+      } },
+      { key: 'score', label: 'Score', numeric: true, render: function (r) { return PG.mk('span', {}, [r.score + '/6']); } }
+    ];
+    PILLAR_KEYS.forEach(function (k) {
+      cols.push({ key: 'p_' + k, label: PILLAR_LABEL[k], numeric: false, render: function (r) { return pillarCell(r, k); } });
+    });
+    cols.push({ key: 'price', label: 'Last', numeric: true });
+    cols.push({ key: 'rr', label: 'Plan R', numeric: true, render: function (r) { var rp = r.risk_plan || {}; return rp.rr === null || rp.rr === undefined ? PG.mk('span', { class: 'pg-muted' }, ['—']) : PG.mk('span', {}, [PG.num(rp.rr, 1) + 'R']); } });
+    cols.push({ key: 'headline', label: 'Verdict in words', numeric: false, render: function (r) { return PG.mk('div', { style: 'max-width:420px;white-space:normal;font-size:12px' }, [String(r.headline || '')]); } });
+    cols.push({ key: 'sources', label: 'Why on the list', numeric: false, render: function (r) { return PG.mk('span', { class: 'pg-muted', style: 'font-size:11.5px' }, [(r.sources || []).join(', ')]); } });
+    box.appendChild(PG.table(rows, { onRow: PG.openStock, columns: cols }));
+    if (payload.basis) box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:11.5px;margin-top:6px' }, [payload.basis]));
+    box.appendChild(PG.detailsBlock('Full setups payload', payload));
+  }
+
+  async function loadSetups(force) {
+    if (setupsLoaded && !force) return;
+    var box = $('setupsBox');
+    PG.loading(box, 'Loading stored checklist run…');
+    try {
+      var payload = await PG.api('get', '/api/screener/setups?limit=120');
+      renderSetups(payload, box, false);
+      setupsLoaded = true;
+    } catch (e) {
+      PG.errBox(box, 'Setups failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function refreshSetups() {
+    var box = $('setupsBox');
+    PG.loading(box, 'Scoring every candidate, leader, watchlist and held stock on six pillars — about a minute…');
+    try {
+      var payload = await PG.api('post', '/api/screener/setups/refresh', { limit: 100 });
+      renderSetups(payload, box, true);
+      PG.notify('Checklist run: ' + ((payload.counts || {}).setup || 0) + ' setups found', 'success');
+    } catch (e) {
+      PG.errBox(box, 'Run failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  /* ---------- leaders (relative strength) ---------- */
+
+  var leadersLoaded = false;
+  var leadersUniverse = 'EGX100';
+
+  function pctCell(v) { return PG.pctNode(v); }
+  function flagCell(v) {
+    if (v === null || v === undefined) return PG.mk('span', { class: 'pg-muted' }, ['—']);
+    return PG.mk('span', { class: 'badge ' + (v ? 'up' : 'neutral') }, [v ? 'yes' : 'no']);
+  }
+
+  function renderLeaders(payload, box, live) {
+    box.innerHTML = '';
+    var rows = Array.isArray(payload.rows) ? payload.rows : [];
+    var head = PG.mk('div', { class: 'pg-form', style: 'margin-bottom:10px;align-items:center' });
+    var sel = PG.mk('select', { id: 'leadersUniverse' });
+    ['EGX30', 'EGX70', 'EGX100'].forEach(function (u) {
+      var o = PG.mk('option', { value: u }, [u]); if (u === leadersUniverse) o.selected = true; sel.appendChild(o);
+    });
+    sel.addEventListener('change', function () { leadersUniverse = sel.value; leadersLoaded = false; loadLeaders(true); });
+    head.appendChild(PG.mk('label', { class: 'pg-field', style: 'margin:0' }, ['Universe ', sel]));
+    var info = rows.length + ' leader' + (rows.length === 1 ? '' : 's')
+      + (payload.date ? ' · ranking of ' + payload.date : '')
+      + (payload.ranked ? ' · ' + payload.ranked + ' ranked' : '')
+      + (payload.benchmark ? ' · benchmark: ' + payload.benchmark : '')
+      + (live ? ' · recomputed just now' : (payload.stored ? ' · stored by the post-close job' : ''));
+    head.appendChild(PG.mk('div', { class: 'pg-muted pg-asof', style: 'margin:0;flex:1' }, [info]));
+    var refresh = PG.mk('button', { type: 'button', class: 'pg-btn secondary' }, ['Refresh (≈1 min)']);
+    refresh.addEventListener('click', refreshLeaders);
+    head.appendChild(refresh);
+    box.appendChild(head);
+    if (!rows.length) {
+      box.appendChild(PG.mk('div', { class: 'pg-muted' },
+        ['No ranking stored yet. The post-close job builds it every trading day at 15:00, or press Refresh to compute it now.']));
+      return;
+    }
+    box.appendChild(PG.table(rows, {
+      onRow: PG.openStock,
+      columns: [
+        { key: 'rank', label: '#', numeric: true },
+        { key: 'symbol', label: 'Symbol', numeric: false },
+        { key: 'price', label: 'Price', numeric: true },
+        { key: 'rs_score', label: 'RS score', numeric: true },
+        { key: 'ret_1m', label: '1m %', numeric: true, render: function (r) { return pctCell(r.ret_1m); } },
+        { key: 'ret_3m', label: '3m %', numeric: true, render: function (r) { return pctCell(r.ret_3m); } },
+        { key: 'ret_6m', label: '6m %', numeric: true, render: function (r) { return pctCell(r.ret_6m); } },
+        { key: 'excess_3m', label: 'vs EGX30 3m', numeric: true, render: function (r) { return pctCell(r.excess_3m); } },
+        { key: 'pct_from_52w_high', label: 'From 52w high', numeric: true, render: function (r) { return pctCell(r.pct_from_52w_high); } },
+        { key: 'new_high', label: 'New high', numeric: false, render: function (r) { return flagCell(r.new_high); } },
+        { key: 'above_sma50', label: '> SMA50', numeric: false, render: function (r) { return flagCell(r.above_sma50); } },
+        { key: 'median_value_20d', label: 'Median value 20d (EGP)', numeric: true }
+      ]
+    }));
+    if (payload.basis) box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:11.5px;margin-top:6px' }, [payload.basis]));
+    box.appendChild(PG.detailsBlock('Full leaders payload', payload));
+  }
+
+  async function loadLeaders(force) {
+    if (leadersLoaded && !force) return;
+    var box = $('leadersBox');
+    PG.loading(box, 'Loading stored ranking…');
+    try {
+      var payload = await PG.api('get', '/api/screener/leaders?universe=' + encodeURIComponent(leadersUniverse) + '&limit=40');
+      renderLeaders(payload, box, false);
+      leadersLoaded = true;
+    } catch (e) {
+      PG.errBox(box, 'Leaders failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function refreshLeaders() {
+    var box = $('leadersBox');
+    PG.loading(box, 'Recomputing relative strength for ' + leadersUniverse + ' from Yahoo history — about a minute…');
+    try {
+      var payload = await PG.api('post', '/api/screener/leaders/refresh', { universe: leadersUniverse, limit: 40 });
+      renderLeaders(payload, box, true);
+      PG.notify('Leaders recomputed: ' + (payload.ranked || 0) + ' ranked, ' + (payload.filtered_illiquid || 0) + ' illiquid filtered', 'success');
+    } catch (e) {
+      PG.errBox(box, 'Refresh failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  /* ---------- chart patterns ---------- */
+
+  var patternsLoaded = false;
+  var patternsUniverse = 'EGX100';
+  var patternsStatus = '';
+  var patternsCategory = '';
+  var hideCandles = true;
+  var PATTERN_CATEGORIES = [['', 'All categories'], ['reversal', 'Reversal'], ['triangle', 'Triangles'],
+    ['continuation', 'Continuation'], ['wedge', 'Wedges'], ['channel', 'Channels'],
+    ['candlestick', 'Candlesticks'], ['price_action', 'Price action']];
+  var RELIABILITY_CLASS = { high: 'up', medium: 'accent', low: 'neutral' };
+
+  function statusBadge(s) {
+    return PG.mk('span', { class: 'badge ' + (s === 'confirmed' ? 'up' : 'neutral') }, [String(s || '—')]);
+  }
+  function directionBadge(d) {
+    var cls = d === 'bullish' ? 'buy' : (d === 'bearish' ? 'sell' : 'neutral');
+    return PG.mk('span', { class: 'badge ' + cls }, [String(d || '—')]);
+  }
+  function tierBadge(v) {
+    return PG.mk('span', { class: 'badge ' + (RELIABILITY_CLASS[v] || 'neutral') }, [String(v || '—')]);
+  }
+
+  function renderPatterns(payload, box, live) {
+    box.innerHTML = '';
+    var rows = Array.isArray(payload.rows) ? payload.rows : [];
+    if (hideCandles && patternsCategory !== 'candlestick') rows = rows.filter(function (r) { return r.category !== 'candlestick'; });
+    var head = PG.mk('div', { class: 'pg-form', style: 'margin-bottom:10px;align-items:center' });
+    var sel = PG.mk('select');
+    ['EGX30', 'EGX70', 'EGX100'].forEach(function (u) {
+      var o = PG.mk('option', { value: u }, [u]); if (u === patternsUniverse) o.selected = true; sel.appendChild(o);
+    });
+    sel.addEventListener('change', function () { patternsUniverse = sel.value; patternsLoaded = false; loadPatterns(true); });
+    head.appendChild(PG.mk('label', { class: 'pg-field', style: 'margin:0' }, ['Universe ', sel]));
+    var st = PG.mk('select');
+    [['', 'All'], ['confirmed', 'Confirmed only'], ['forming', 'Forming only']].forEach(function (p) {
+      var o = PG.mk('option', { value: p[0] }, [p[1]]); if (p[0] === patternsStatus) o.selected = true; st.appendChild(o);
+    });
+    st.addEventListener('change', function () { patternsStatus = st.value; patternsLoaded = false; loadPatterns(true); });
+    head.appendChild(PG.mk('label', { class: 'pg-field', style: 'margin:0' }, ['Status ', st]));
+    var cat = PG.mk('select');
+    PATTERN_CATEGORIES.forEach(function (p) {
+      var o = PG.mk('option', { value: p[0] }, [p[1]]); if (p[0] === patternsCategory) o.selected = true; cat.appendChild(o);
+    });
+    cat.addEventListener('change', function () { patternsCategory = cat.value; patternsLoaded = false; loadPatterns(true); });
+    head.appendChild(PG.mk('label', { class: 'pg-field', style: 'margin:0' }, ['Category ', cat]));
+    var hc = PG.mk('input', { type: 'checkbox', id: 'hideCandles' });
+    hc.checked = hideCandles;
+    hc.addEventListener('change', function () { hideCandles = hc.checked; patternsLoaded = false; loadPatterns(true); });
+    var hcLabel = PG.mk('label', { style: 'margin:0;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);white-space:nowrap;cursor:pointer', title: 'Candlestick patterns fire on many stocks every session; hide them to see the chart shapes and price-action events' }, [hc, 'Hide candlesticks']);
+    head.appendChild(hcLabel);
+    var catalogBtn = PG.mk('button', { type: 'button', class: 'pg-btn secondary' }, ['Catalog']);
+    catalogBtn.addEventListener('click', function () { showCatalog(box); });
+    head.appendChild(catalogBtn);
+    var byCat = payload.by_category || {};
+    var catBits = Object.keys(byCat).map(function (k) { return k.replace('_', ' ') + ' ' + byCat[k]; }).join(', ');
+    var info = rows.length + ' pattern' + (rows.length === 1 ? '' : 's')
+      + (payload.confirmed !== undefined ? ' · ' + payload.confirmed + ' confirmed' : '')
+      + (catBits ? ' · ' + catBits : '')
+      + (payload.date ? ' · scan of ' + payload.date : '')
+      + (live ? ' · scanned just now' : (payload.stored ? ' · stored by the post-close job' : ''));
+    head.appendChild(PG.mk('div', { class: 'pg-muted pg-asof', style: 'margin:0;flex:1' }, [info]));
+    var refresh = PG.mk('button', { type: 'button', class: 'pg-btn secondary' }, ['Scan now (≈1 min)']);
+    refresh.addEventListener('click', refreshPatterns);
+    head.appendChild(refresh);
+    box.appendChild(head);
+    if (!rows.length) {
+      box.appendChild(PG.mk('div', { class: 'pg-muted' },
+        ['No patterns stored yet for this filter. The post-close job scans every trading day at 15:00, or press Scan now.']));
+      return;
+    }
+    box.appendChild(PG.table(rows, {
+      onRow: PG.openStock,
+      columns: [
+        { key: 'symbol', label: 'Symbol', numeric: false },
+        { key: 'label', label: 'Pattern', numeric: false, render: function (r) {
+          var suffix = r.broke === 'up' ? ' ↑ broke up' : (r.broke === 'down' ? ' ↓ broke down' : '');
+          return PG.mk('span', { title: r.note || '' }, [String(r.label || r.pattern) + suffix]);
+        } },
+        { key: 'category', label: 'Category', numeric: false, render: function (r) { return PG.mk('span', {}, [String(r.category || '').replace('_', ' ')]); } },
+        { key: 'direction', label: 'Direction', numeric: false, render: function (r) { return directionBadge(r.direction); } },
+        { key: 'kind', label: 'Kind', numeric: false },
+        { key: 'reliability', label: 'Reliability', numeric: false, render: function (r) { return tierBadge(r.reliability); } },
+        { key: 'frequency', label: 'Frequency', numeric: false },
+        { key: 'status', label: 'Status', numeric: false, render: function (r) { return statusBadge(r.status); } },
+        { key: 'quality', label: 'Quality', numeric: true, render: function (r) { return PG.mk('span', {}, [String(Math.round(Number(r.quality) || 0))]); } },
+        { key: 'last_close', label: 'Last', numeric: true },
+        { key: 'neckline', label: 'Neckline', numeric: true },
+        { key: 'distance_to_neckline_pct', label: 'To neckline %', numeric: true, render: function (r) { return PG.pctNode(r.distance_to_neckline_pct); } },
+        { key: 'target', label: 'Target', numeric: true },
+        { key: 'target_pct', label: 'Target %', numeric: true, render: function (r) { return PG.pctNode(r.target_pct); } },
+        { key: 'move_progress_pct', label: 'Move done %', numeric: true },
+        { key: 'stop_hint', label: 'Stop hint', numeric: true },
+        { key: 'break_date', label: 'Break date', numeric: false },
+        { key: 'break_volume_ratio', label: 'Break vol ×', numeric: true },
+        { key: 'start_date', label: 'Since', numeric: false },
+        { key: 'median_value_20d', label: 'Median value 20d', numeric: true }
+      ]
+    }));
+    if (payload.basis) box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:11.5px;margin-top:6px' }, [payload.basis]));
+    box.appendChild(PG.detailsBlock('Full patterns payload', payload));
+  }
+
+  async function loadPatterns(force) {
+    if (patternsLoaded && !force) return;
+    var box = $('patternsBox');
+    PG.loading(box, 'Loading stored pattern scan…');
+    try {
+      var q = '?universe=' + encodeURIComponent(patternsUniverse) + (patternsStatus ? '&status=' + patternsStatus : '')
+        + (patternsCategory ? '&category=' + patternsCategory : '');
+      var payload = await PG.api('get', '/api/screener/patterns' + q);
+      renderPatterns(payload, box, false);
+      patternsLoaded = true;
+    } catch (e) {
+      PG.errBox(box, 'Patterns failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function refreshPatterns() {
+    var box = $('patternsBox');
+    PG.loading(box, 'Scanning ' + patternsUniverse + ' for chart patterns — about a minute…');
+    try {
+      var payload = await PG.api('post', '/api/screener/patterns/refresh', { universe: patternsUniverse });
+      if (patternsStatus) payload.rows = (payload.rows || []).filter(function (r) { return r.status === patternsStatus; });
+      if (patternsCategory) payload.rows = (payload.rows || []).filter(function (r) { return r.category === patternsCategory; });
+      renderPatterns(payload, box, true);
+      PG.notify('Scan done: ' + (payload.found || 0) + ' patterns, ' + (payload.confirmed || 0) + ' confirmed', 'success');
+    } catch (e) {
+      PG.errBox(box, 'Scan failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function showCatalog(box) {
+    PG.loading(box, 'Loading pattern catalog…');
+    try {
+      var c = await PG.api('get', '/api/screener/patterns/catalog');
+      box.innerHTML = '';
+      var head = PG.mk('div', { class: 'pg-form', style: 'margin-bottom:10px;align-items:center' });
+      head.appendChild(PG.mk('div', { class: 'pg-muted pg-asof', style: 'margin:0;flex:1' },
+        [c.count + ' patterns in 7 categories · ' + c.detected + ' detected by the scanner']));
+      var back = PG.mk('button', { type: 'button', class: 'pg-btn secondary' }, ['Back to scan']);
+      back.addEventListener('click', function () { patternsLoaded = false; loadPatterns(true); });
+      head.appendChild(back);
+      box.appendChild(head);
+      var rows = (c.patterns || []).map(function (p) {
+        var s = p.egx_stats || {};
+        return { category: p.category_label, label: p.label, direction: p.direction, kind: p.kind,
+          reliability: p.reliability, frequency: p.frequency, note: p.note,
+          egx_graded: s.graded, egx_win_10d: s.win_rate_10d, egx_beat_10d: s.beat_rate_10d, egx_excess_10d: s.avg_excess_10d };
+      });
+      box.appendChild(PG.table(rows, {
+        maxCols: 12,
+        columns: [
+          { key: 'category', label: 'Category', numeric: false },
+          { key: 'label', label: 'Pattern', numeric: false },
+          { key: 'direction', label: 'Direction', numeric: false, render: function (r) { return directionBadge(r.direction); } },
+          { key: 'kind', label: 'Kind', numeric: false },
+          { key: 'reliability', label: 'Reliability (classic refs)', numeric: false, render: function (r) { return tierBadge(r.reliability); } },
+          { key: 'frequency', label: 'Frequency', numeric: false },
+          { key: 'egx_graded', label: 'EGX graded', numeric: true },
+          { key: 'egx_win_10d', label: 'EGX win 10d %', numeric: true },
+          { key: 'egx_beat_10d', label: 'EGX beat index 10d %', numeric: true },
+          { key: 'egx_excess_10d', label: 'EGX avg excess 10d %', numeric: true, render: function (r) { return PG.pctNode(r.egx_excess_10d); } },
+          { key: 'note', label: 'What it is', numeric: false, render: function (r) {
+            return PG.mk('div', { style: 'max-width:460px;white-space:normal;font-size:12px' }, [String(r.note || '')]);
+          } }
+        ]
+      }));
+      if (c.basis) box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:11.5px;margin-top:6px' }, [c.basis]));
+    } catch (e) {
+      PG.errBox(box, 'Catalog failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  /* ---------- signal scorecard ---------- */
+
+  function renderScorecard(card, box) {
+    box.innerHTML = '';
+    var scanners = card.scanners || {};
+    var names = Object.keys(scanners);
+    var head = PG.mk('div', { class: 'pg-form', style: 'margin-bottom:10px;align-items:center' });
+    head.appendChild(PG.mk('div', { class: 'pg-muted pg-asof', style: 'margin:0;flex:1' },
+      [(card.hits_total || 0) + ' hits stored · ' + (card.outcomes || 0) + ' graded · ' + (card.hits_ungraded || 0) + ' waiting for price history'
+        + ' · weights change after ' + card.min_sample + ' graded hits']));
+    var grade = PG.mk('button', { type: 'button', class: 'pg-btn secondary' }, ['Grade now']);
+    grade.addEventListener('click', gradeNow);
+    head.appendChild(grade);
+    box.appendChild(head);
+    if (!names.length) {
+      box.appendChild(PG.mk('div', { class: 'pg-muted' },
+        ['Nothing graded yet. A hit can only be graded once 5 sessions have passed since it fired, so the first rows appear about a week after the scanners start running. Come back then.']));
+      return;
+    }
+    var rows = names.map(function (n) {
+      var s = scanners[n], h5 = (s.horizons || {})['5'] || {}, h10 = (s.horizons || {})['10'] || {}, h20 = (s.horizons || {})['20'] || {};
+      return {
+        scanner: n, hits_graded: s.hits_graded, weight: s.weight, weight_basis: s.weight_basis,
+        n_10: h10.n, win_10: h10.win_rate, beat_10: h10.beat_rate, excess_10: h10.avg_excess,
+        n_5: h5.n, beat_5: h5.beat_rate, excess_5: h5.avg_excess,
+        n_20: h20.n, beat_20: h20.beat_rate, excess_20: h20.avg_excess
+      };
+    });
+    box.appendChild(PG.table(rows, {
+      columns: [
+        { key: 'scanner', label: 'Scanner', numeric: false },
+        { key: 'hits_graded', label: 'Graded', numeric: true },
+        { key: 'weight', label: 'Weight', numeric: true, render: function (r) {
+          var suff = r.weight_basis && r.weight_basis.indexOf('neutral') === 0;
+          return PG.mk('span', { class: 'badge ' + (suff ? 'neutral' : (r.weight > 1 ? 'up' : (r.weight < 1 ? 'down' : 'accent'))), title: r.weight_basis || '' }, [PG.num(r.weight)]);
+        } },
+        { key: 'n_5', label: 'n 5d', numeric: true }, { key: 'beat_5', label: 'Beat EGX30 5d %', numeric: true }, { key: 'excess_5', label: 'Avg excess 5d %', numeric: true, render: function (r) { return pctCell(r.excess_5); } },
+        { key: 'n_10', label: 'n 10d', numeric: true }, { key: 'win_10', label: 'Win 10d %', numeric: true }, { key: 'beat_10', label: 'Beat EGX30 10d %', numeric: true }, { key: 'excess_10', label: 'Avg excess 10d %', numeric: true, render: function (r) { return pctCell(r.excess_10); } },
+        { key: 'n_20', label: 'n 20d', numeric: true }, { key: 'beat_20', label: 'Beat EGX30 20d %', numeric: true }, { key: 'excess_20', label: 'Avg excess 20d %', numeric: true, render: function (r) { return pctCell(r.excess_20); } }
+      ]
+    }));
+    if (card.basis) box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:11.5px;margin-top:6px' }, [card.basis]));
+    box.appendChild(PG.detailsBlock('Full scorecard payload', card));
+  }
+
+  async function loadScorecard() {
+    var box = $('scorecardBox');
+    PG.loading(box, 'Loading scorecard…');
+    try {
+      var card = await PG.api('get', '/api/screener/scorecard');
+      renderScorecard(card, box);
+    } catch (e) {
+      PG.errBox(box, 'Scorecard failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function gradeNow() {
+    var box = $('scorecardBox');
+    PG.loading(box, 'Grading pending hits against Yahoo history…');
+    try {
+      var r = await PG.api('post', '/api/screener/scorecard/grade', {});
+      PG.notify('Graded ' + (r.graded || 0) + ' hit(s)' + (r.still_open ? ', ' + r.still_open + ' still waiting for more sessions' : ''), 'success');
+      await loadScorecard();
+    } catch (e) {
+      PG.errBox(box, 'Grading failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  /* ---------- tabs ---------- */
+
+  var MODES = {
+    scanner: { tab: 'tabScanner', sections: ['scannerSection', 'resultsSection'] },
+    candidates: { tab: 'tabCandidates', sections: ['candidatesSection'] },
+    setups: { tab: 'tabSetups', sections: ['setupsSection'] },
+    leaders: { tab: 'tabLeaders', sections: ['leadersSection'] },
+    patterns: { tab: 'tabPatterns', sections: ['patternsSection'] },
+    scorecard: { tab: 'tabScorecard', sections: ['scorecardSection'] }
+  };
+
   function setMode(mode) {
-    var scanner = mode === 'scanner';
-    $('tabScanner').classList.toggle('active', scanner);
-    $('tabCandidates').classList.toggle('active', !scanner);
-    $('scannerSection').style.display = scanner ? '' : 'none';
-    $('resultsSection').style.display = scanner ? '' : 'none';
-    $('candidatesSection').style.display = scanner ? 'none' : '';
-    if (!scanner) loadCandidates(false);
+    Object.keys(MODES).forEach(function (m) {
+      $(MODES[m].tab).classList.toggle('active', m === mode);
+      MODES[m].sections.forEach(function (id) { $(id).style.display = m === mode ? '' : 'none'; });
+    });
+    if (mode === 'candidates') loadCandidates(false);
+    if (mode === 'setups') loadSetups(false);
+    if (mode === 'leaders') loadLeaders(false);
+    if (mode === 'patterns') loadPatterns(false);
+    if (mode === 'scorecard') loadScorecard();
   }
 
   async function init() {
     PG.boot('screener');
     $('tabScanner').addEventListener('click', function () { setMode('scanner'); });
     $('tabCandidates').addEventListener('click', function () { setMode('candidates'); });
+    $('tabLeaders').addEventListener('click', function () { setMode('leaders'); });
+    $('tabSetups').addEventListener('click', function () { setMode('setups'); });
+    if (/[?&]tab=setups/.test(location.search)) setMode('setups');
+    $('tabScorecard').addEventListener('click', function () { setMode('scorecard'); });
+    $('tabPatterns').addEventListener('click', function () { setMode('patterns'); });
+    if (/[?&]tab=patterns/.test(location.search)) setMode('patterns');
+    if (/[?&]tab=leaders/.test(location.search)) setMode('leaders');
+    if (/[?&]tab=scorecard/.test(location.search)) setMode('scorecard');
     $('scannerForm').addEventListener('submit', runScanner);
     try {
       PG.loading($('scannerMeta'), 'Loading scanners…');

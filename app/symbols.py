@@ -31,8 +31,8 @@ def tv_to_yahoo(symbol: str) -> str:
     suffix are returned unchanged.
     """
     clean = _clean(symbol)
-    if "." in clean:
-        return clean
+    if "." in clean or clean.startswith("^"):
+        return clean  # already Yahoo-form, or an index like ^CASE30
     return f"{clean}.CA"
 
 

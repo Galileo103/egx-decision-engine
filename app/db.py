@@ -89,6 +89,53 @@ _SCHEMA: tuple[str, ...] = (
         period TEXT, interval TEXT, params_json TEXT, result_json TEXT
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS position_fills(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        position_id INTEGER, ts TEXT, side TEXT, qty REAL, price REAL,
+        fees REAL, realized_pnl REAL, entry_after REAL, qty_after REAL, note TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS signal_outcomes(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hit_id INTEGER, date TEXT, scanner TEXT, symbol TEXT,
+        entry_date TEXT, entry_close REAL,
+        ret_5 REAL, bench_5 REAL, excess_5 REAL,
+        ret_10 REAL, bench_10 REAL, excess_10 REAL,
+        ret_20 REAL, bench_20 REAL, excess_20 REAL,
+        graded_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS rs_leaders(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT, universe TEXT, symbol TEXT, rank INTEGER, rs_score REAL,
+        payload_json TEXT, created_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS pattern_hits(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT, universe TEXT, symbol TEXT, pattern TEXT, status TEXT, quality INTEGER,
+        payload_json TEXT, created_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS setups(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT, symbol TEXT, score INTEGER, verdict TEXT, headline TEXT,
+        payload_json TEXT, created_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS guardian_verdicts(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT, position_id INTEGER, symbol TEXT,
+        verdict TEXT, severity TEXT, mark REAL, r_now REAL, suggested_stop REAL,
+        reasons_json TEXT, notified INTEGER DEFAULT 0, created_at TEXT
+    )
+    """,
 )
 
 
@@ -144,6 +191,11 @@ def close_conn() -> None:
 _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE positions ADD COLUMN fees REAL",
     "ALTER TABLE positions ADD COLUMN plan_followed INTEGER",
+    # The stop at ENTRY — the risk anchor for every R-multiple. `stop` is the
+    # CURRENT protective stop, which the guardian raises over time; without a
+    # frozen initial stop, tightening the stop would silently inflate R.
+    "ALTER TABLE positions ADD COLUMN initial_stop REAL",
+    "ALTER TABLE pattern_hits ADD COLUMN category TEXT",
 )
 
 # Indexes on the hot query paths. Without these the 10-minute alert cycle
@@ -162,6 +214,17 @@ _INDEXES: tuple[str, ...] = (
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_scanner_hits_unique "
     "ON scanner_hits(date, scanner, symbol)",
     "CREATE INDEX IF NOT EXISTS idx_backtest_runs_symbol ON backtest_runs(symbol, ts)",
+    # One guardian verdict per position per Cairo date (INSERT OR REPLACE keeps
+    # the latest run of the day; the Telegram dedupe reads the same row).
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_guardian_verdicts_unique "
+    "ON guardian_verdicts(date, position_id)",
+    "CREATE INDEX IF NOT EXISTS idx_position_fills_position ON position_fills(position_id, id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_outcomes_hit ON signal_outcomes(hit_id)",
+    "CREATE INDEX IF NOT EXISTS idx_signal_outcomes_scanner ON signal_outcomes(scanner, date)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_rs_leaders_unique ON rs_leaders(date, universe, symbol)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_pattern_hits_unique "
+    "ON pattern_hits(date, universe, symbol, pattern)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_setups_unique ON setups(date, symbol)",
 )
 
 #: Collapse pre-existing duplicate scanner_hits rows (keep the newest id) so

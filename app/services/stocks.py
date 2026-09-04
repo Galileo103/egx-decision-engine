@@ -156,6 +156,16 @@ def _plan_checks(bare: str, analysis: dict, trade_plan: dict) -> list[str]:
                             f"more than one ±{band:.0f}% limit session away; treat it as "
                             "a multi-day swing target."
                         )
+        # Stops parked just above tested support / targets just under tested
+        # resistance are the two most common plan mistakes — say so.
+        try:
+            from app.services import levels as _levels
+
+            lv = _levels.compute(bare)
+            checks.extend(_levels.plan_checks(lv, levels.get("stop"), [levels.get("t1"), levels.get("t2")]))
+        except Exception:  # noqa: BLE001 — advisory only
+            pass
+
         from app.services.market import median_daily_value
 
         liquidity = median_daily_value(bare)

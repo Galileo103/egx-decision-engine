@@ -24,6 +24,28 @@
         <div class="stat"><div class="stat-label">Session (Cairo)</div><div class="stat-value" id="st-session" style="font-size:15px">—</div><div class="stat-sub" id="st-session-sub"></div></div>
       </div>
 
+      <div class="card" style="margin-bottom:14px" id="today-card">
+        <div class="card-title"><span>Today — what needs a decision</span><span class="as-of muted" id="today-asof"></span></div>
+        <div class="today-grid" id="today-grid">
+          <div class="today-col">
+            <div class="today-head">Best setups <a class="muted today-link" href="screener.html?tab=setups">all →</a></div>
+            <div id="today-setups"><div class="skeleton"><div class="sk-line" style="width:80%"></div><div class="sk-line" style="width:60%"></div></div></div>
+          </div>
+          <div class="today-col">
+            <div class="today-head">Your positions <a class="muted today-link" href="portfolio.html">portfolio →</a></div>
+            <div id="today-positions"><div class="skeleton"><div class="sk-line" style="width:80%"></div><div class="sk-line" style="width:60%"></div></div></div>
+          </div>
+          <div class="today-col">
+            <div class="today-head">Patterns on your stocks <a class="muted today-link" href="screener.html?tab=patterns">all patterns →</a></div>
+            <div id="today-patterns"><div class="skeleton"><div class="sk-line" style="width:80%"></div><div class="sk-line" style="width:60%"></div></div></div>
+          </div>
+          <div class="today-col">
+            <div class="today-head">Strongest vs EGX30 <a class="muted today-link" href="screener.html?tab=leaders">leaders →</a></div>
+            <div id="today-leaders"><div class="skeleton"><div class="sk-line" style="width:80%"></div><div class="sk-line" style="width:60%"></div></div></div>
+          </div>
+        </div>
+      </div>
+
       <div class="card" style="margin-bottom:14px">
         <div class="card-title"><span>Global snapshot</span></div>
         <div id="global-strip"><div class="skeleton"><div class="sk-line" style="width:70%"></div></div></div>
@@ -50,7 +72,7 @@
           <div id="heatmap"></div>
         </div>
         <div class="card" style="margin:0">
-          <div class="card-title"><span>Candidates</span><span class="as-of muted" id="cands-asof"></span></div>
+          <div class="card-title"><span>Candidates</span><span style="display:flex;gap:8px;align-items:center"><span class="as-of muted" id="cands-asof"></span><button class="btn small" id="btn-cands-live" title="Re-run every scanner now (about a minute)">Rescan</button></span></div>
           <div id="candidates"></div>
         </div>
       </div>
@@ -85,8 +107,10 @@
     loadOverview();
     loadGlobal();
     loadSectors();
-    loadCandidates();
+    loadToday();
+    loadCandidates(false);
     loadBrief();
+    document.getElementById("btn-cands-live").addEventListener("click", function () { loadCandidates(true); });
     document.getElementById("btn-brief").addEventListener("click", generateBrief);
   });
 
@@ -132,6 +156,149 @@
   }
 
   /* ---------- overview: breadth + gainers/losers/active ---------- */
+
+  /* ---------- today panel: decisions first ---------- */
+
+  var SEV_CLASS = { critical: "sell", action: "buy", warning: "neutral", advice: "neutral", ok: "up" };
+
+  function symLink(sym) {
+    return el("a", { class: "sym", href: "stock.html?symbol=" + encodeURIComponent(sym), text: sym });
+  }
+
+  var PILLAR_SHORT = { trend: "Trend", support_resistance: "S/R", volume: "Vol", price_action: "PA", patterns: "Pat", risk: "Risk" };
+  var PILLAR_ICON = { pass: "\u2713", warn: "\u26A0", fail: "\u2717" };
+
+  function pillarStrip(pillars) {
+    var wrap = el("span", { class: "pillar-strip" });
+    Object.keys(PILLAR_SHORT).forEach(function (k) {
+      var st = (pillars || {})[k] || "warn";
+      wrap.appendChild(el("span", { class: "pillar-chip " + st, title: PILLAR_SHORT[k] + ": " + st, text: PILLAR_ICON[st] || "?" }));
+    });
+    return wrap;
+  }
+
+  function loadSetups() {
+    var box = document.getElementById("today-setups");
+    API.get("/api/screener/setups?limit=60").then(function (s) {
+      var rows = s && Array.isArray(s.rows) ? s.rows : [];
+      U.clear(box);
+      if (!rows.length) {
+        box.appendChild(el("div", { class: "empty-note", text: "No checklist run stored yet — built after each close (15:00), or press Run on the Setups tab." }));
+        return;
+      }
+      var setups = rows.filter(function (r) { return r.verdict === "setup"; });
+      var watch = rows.filter(function (r) { return r.verdict === "watch"; }).slice(0, 4);
+      var show = setups.slice(0, 6).concat(setups.length < 3 ? watch : []);
+      var list = el("div", { class: "today-list" });
+      show.forEach(function (r) {
+        var line = el("div", { class: "today-item", title: r.headline || "" }, [
+          symLink(r.symbol),
+          el("span", { class: "badge " + (r.verdict === "setup" ? "up" : "neutral"), text: r.score + "/6" }),
+          pillarStrip(r.pillars),
+          el("span", { class: "muted today-sub", text: (r.missing && r.missing.length ? "needs " + r.missing.slice(0, 2).join(", ").toLowerCase() : "all six") }),
+        ]);
+        list.appendChild(line);
+      });
+      box.appendChild(list);
+      var c = s.counts || {};
+      box.appendChild(el("div", { class: "muted today-sub", style: { marginTop: "6px" }, text: (c.setup || 0) + " setups · " + (c.watch || 0) + " watch · " + (c.no_setup || 0) + " no setup · checklist of " + (s.date || "") }));
+    }).catch(function (e) {
+      U.clear(box).appendChild(el("div", { class: "empty-note", text: "Setups unavailable: " + e.message }));
+    });
+  }
+
+  function loadToday() {
+    loadSetups();
+    var posBox = document.getElementById("today-positions");
+    var patBox = document.getElementById("today-patterns");
+    var leadBox = document.getElementById("today-leaders");
+    var held = [];
+
+    var guardian = API.get("/api/portfolio/guardian").then(function (g) {
+      var rows = g && Array.isArray(g.verdicts) ? g.verdicts : [];
+      held = rows.map(function (r) { return String(r.symbol || "").toUpperCase(); });
+      U.clear(posBox);
+      if (!rows.length) {
+        posBox.appendChild(el("div", { class: "empty-note", text: "No open positions recorded. Add them on the portfolio page and the Guardian starts watching." }));
+        return;
+      }
+      var need = rows.filter(function (r) { return r.severity !== "ok" && r.severity !== "advice"; });
+      var advice = rows.filter(function (r) { return r.severity === "advice"; });
+      var hold = rows.length - need.length - advice.length;
+      var list = el("div", { class: "today-list" });
+      need.concat(advice).forEach(function (r) {
+        var line = el("div", { class: "today-item" }, [
+          symLink(r.symbol),
+          el("span", { class: "badge " + (SEV_CLASS[r.severity] || "neutral"), text: String(r.verdict || "").replace(/_/g, " ") }),
+          el("span", { class: "muted today-sub", text: (r.r_now !== null && r.r_now !== undefined ? (r.r_now > 0 ? "+" : "") + fmtNum(r.r_now) + "R" : "") }),
+        ]);
+        if (r.reasons && r.reasons.length) line.title = String(r.reasons[0]);
+        list.appendChild(line);
+      });
+      posBox.appendChild(list);
+      var summary = (need.length ? need.length + " need a decision" : "nothing urgent")
+        + (advice.length ? " · " + advice.length + " advice" : "") + " · " + hold + " hold";
+      posBox.appendChild(el("div", { class: "muted today-sub", style: { marginTop: "6px" }, text: summary }));
+      if (g && g.as_of) setText("today-asof", "guardian " + String(g.as_of).slice(11, 16));
+    }).catch(function (e) {
+      U.clear(posBox).appendChild(el("div", { class: "empty-note", text: "Guardian unavailable: " + e.message }));
+    });
+
+    var watch = API.get("/api/watchlist").then(function (w) {
+      var rows = Array.isArray(w) ? w : (U.firstArray(w, ["watchlist", "items", "symbols"]) || []);
+      return rows.map(function (r) { return String((r && (r.symbol || r)) || "").toUpperCase(); }).filter(Boolean);
+    }).catch(function () { return []; });
+
+    Promise.all([guardian, watch]).then(function (res) {
+      var mine = {};
+      held.forEach(function (s) { mine[s] = "held"; });
+      (res[1] || []).forEach(function (s) { if (!mine[s]) mine[s] = "watch"; });
+      return API.get("/api/screener/patterns?universe=EGX100&status=confirmed").then(function (p) {
+        var rows = (p && Array.isArray(p.rows) ? p.rows : []).filter(function (r) {
+          return mine[String(r.symbol || "").toUpperCase()] && r.category !== "candlestick" && r.direction !== "neutral";
+        });
+        U.clear(patBox);
+        if (!rows.length) {
+          patBox.appendChild(el("div", { class: "empty-note", text: "No confirmed chart or price-action pattern on a stock you hold or watch" + (p && p.date ? " (scan of " + p.date + ")." : ".") }));
+          return;
+        }
+        var list = el("div", { class: "today-list" });
+        rows.slice(0, 8).forEach(function (r) {
+          list.appendChild(el("div", { class: "today-item", title: r.note || "" }, [
+            symLink(r.symbol),
+            el("span", { class: "badge " + (r.direction === "bullish" ? "buy" : "sell"), text: r.direction }),
+            el("span", { class: "today-sub", text: r.label + (mine[r.symbol] === "watch" ? " · watchlist" : "") }),
+          ]));
+        });
+        patBox.appendChild(list);
+      });
+    }).catch(function (e) {
+      U.clear(patBox).appendChild(el("div", { class: "empty-note", text: "Patterns unavailable: " + e.message }));
+    });
+
+    API.get("/api/screener/leaders?universe=EGX100&limit=5").then(function (l) {
+      var rows = l && Array.isArray(l.rows) ? l.rows : [];
+      U.clear(leadBox);
+      if (!rows.length) {
+        leadBox.appendChild(el("div", { class: "empty-note", text: "No ranking stored yet — built after each close, or press Refresh on the Leaders tab." }));
+        return;
+      }
+      var list = el("div", { class: "today-list" });
+      rows.forEach(function (r) {
+        list.appendChild(el("div", { class: "today-item" }, [
+          el("span", { class: "muted today-rank", text: "#" + r.rank }),
+          symLink(r.symbol),
+          el("span", { class: "today-sub", text: "RS " + fmtNum(r.rs_score) }),
+          el("span", { class: "num " + U.changeClass(r.ret_3m), text: (r.ret_3m > 0 ? "+" : "") + fmtNum(r.ret_3m) + "% 3m" }),
+          r.new_high ? el("span", { class: "badge up", text: "new high" }) : el("span"),
+        ]));
+      });
+      leadBox.appendChild(list);
+      leadBox.appendChild(el("div", { class: "muted today-sub", style: { marginTop: "6px" }, text: "ranking of " + (l.date || "") }));
+    }).catch(function (e) {
+      U.clear(leadBox).appendChild(el("div", { class: "empty-note", text: "Leaders unavailable: " + e.message }));
+    });
+  }
 
   function loadOverview() {
     var boxes = ["tbl-gainers", "tbl-losers", "tbl-active"].map(function (id) { return document.getElementById(id); });
@@ -255,8 +422,10 @@
           var alpha = Math.min(0.5, Math.abs(chg) / 5 + 0.06);
           bg = chg >= 0 ? "rgba(52,199,123," + alpha.toFixed(2) + ")" : "rgba(229,83,75," + alpha.toFixed(2) + ")";
         }
-        grid.appendChild(el("div", { class: "heat-tile", style: { background: bg }, title: t.name }, [
-          el("div", { class: "heat-name", text: t.name }),
+        var pretty = String(t.name).replace(/_/g, " ").replace(/\band\b/g, "&")
+          .replace(/\b\w/g, function (ch) { return ch.toUpperCase(); }).replace(/ It /, " IT ");
+        grid.appendChild(el("div", { class: "heat-tile", style: { background: bg }, title: pretty }, [
+          el("div", { class: "heat-name", text: pretty }),
           el("div", { class: "heat-pct " + U.changeClass(chg), text: chg === null ? "—" : (chg > 0 ? "+" : "") + chg.toFixed(2) + "%" }),
         ]));
       });
@@ -266,11 +435,21 @@
 
   /* ---------- candidates panel ---------- */
 
-  function loadCandidates() {
+  function loadCandidates(live) {
     var box = document.getElementById("candidates");
-    U.load(box, function () { return API.get("/api/screener/candidates"); }, function (c, data) {
+    var loader = live
+      ? function () { return API.get("/api/screener/candidates"); }
+      : function () {
+          return API.get("/api/screener/candidates/latest").then(function (d) {
+            if (d && Array.isArray(d.candidates) && d.candidates.length) return d;
+            return API.get("/api/screener/candidates");   // nothing stored yet → live
+          });
+        };
+    U.load(box, loader, function (c, data) {
       var asof = U.pick(data, ["as_of", "asOf"]);
-      if (typeof asof === "string") setText("cands-asof", asof.slice(0, 16).replace("T", " "));
+      if (typeof asof === "string") {
+        setText("cands-asof", (data.stored ? "stored scan · " : "live · ") + asof.slice(0, 16).replace("T", " "));
+      }
       // Use the canonical key directly (even when empty) so an empty scan
       // never falls through to unrelated arrays like scanner_errors.
       var rows = (data && Array.isArray(data.candidates))

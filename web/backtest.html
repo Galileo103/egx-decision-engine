@@ -59,12 +59,54 @@
       </section>
 
       <div class="pg-tabs" role="tablist">
-        <button type="button" class="pg-tab active" data-tab="single">Single run</button>
+        <button type="button" class="pg-tab active" data-tab="rules">App rules</button>
+        <button type="button" class="pg-tab" data-tab="single">Indicator strategies</button>
         <button type="button" class="pg-tab" data-tab="compare">Compare all</button>
         <button type="button" class="pg-tab" data-tab="wf">Walk-forward</button>
       </div>
 
-      <section class="pg-panel" id="pane-single">
+      <section class="pg-panel" id="pane-rules">
+        <h2>Test the app's own rules</h2>
+        <div class="pg-muted" style="font-size:12.5px;margin-bottom:12px">
+          The scanners tell you what to buy and the Guardian tells you when to sell. This tests exactly those rules on real
+          daily history: enter at the next open after the signal, stop 2×ATR, fees and slippage charged, one position at a time.
+          Every result ends with a verdict in plain words and a warning when there are too few trades to mean anything.
+        </div>
+        <form class="pg-form" id="rulesForm" style="margin-bottom:10px">
+          <label class="pg-field">Symbol
+            <input id="rSymbol" type="text" list="symlist" placeholder="COMI" autocomplete="off">
+          </label>
+          <label class="pg-field">Entry rule
+            <select id="rEntry"></select>
+          </label>
+          <label class="pg-field">Exit rule
+            <select id="rExit"></select>
+          </label>
+          <label class="pg-field">Period
+            <select id="rPeriod">
+              <option value="1y">1 year</option>
+              <option value="2y" selected>2 years</option>
+              <option value="3y">3 years</option>
+              <option value="5y">5 years</option>
+            </select>
+          </label>
+          <label class="pg-field">Capital (EGP)
+            <input id="rCapital" type="number" step="any" min="1000" value="100000">
+          </label>
+          <button type="submit" class="pg-btn" id="rRunBtn">Run</button>
+          <button type="button" class="pg-btn secondary" id="rExitsBtn" title="Same entries, all four exit styles">Compare exits</button>
+          <button type="button" class="pg-btn secondary" id="rStopsBtn" title="Try stops from 1× to 4× ATR">Stop sweep</button>
+          <label class="pg-field">Universe
+            <select id="rUniverse"><option>EGX30</option><option>EGX70</option><option>EGX100</option></select>
+          </label>
+          <button type="button" class="pg-btn secondary" id="rUniverseBtn" title="The same rule on every stock in the universe (~1 min)">Run on universe</button>
+          <button type="button" class="pg-btn secondary" id="rReplayBtn" title="Your open positions under the Guardian's rules vs what actually happened">Replay my positions</button>
+        </form>
+        <div id="rRuleHelp" class="pg-muted" style="font-size:12px;margin-bottom:10px"></div>
+        <div id="rulesBox"><div class="pg-muted" style="font-size:13px">Pick a stock you hold or watch, choose a rule pair, press Run.</div></div>
+      </section>
+
+      <section class="pg-panel" id="pane-single" style="display:none">
         <h2>Backtest result</h2>
         <div id="singleBox"><div class="pg-muted" style="font-size:13px">Fill the form and press "Run backtest".</div></div>
       </section>
@@ -108,7 +150,7 @@
   function setTab(name) {
     var tabs = document.querySelectorAll('.pg-tab[data-tab]');
     for (var i = 0; i < tabs.length; i++) tabs[i].classList.toggle('active', tabs[i].getAttribute('data-tab') === name);
-    ['single', 'compare', 'wf'].forEach(function (t) {
+    ['rules', 'single', 'compare', 'wf'].forEach(function (t) {
       var pane = $('pane-' + t);
       if (pane) pane.style.display = t === name ? '' : 'none';
     });
@@ -478,7 +520,233 @@
     } finally { btn.disabled = false; }
   }
 
+  /* ---------- App-rules backtests ---------- */
+
+  var RULES = { entry_rules: {}, exit_rules: {} };
+
+  function ruleHelp() {
+    var e = RULES.entry_rules[$('rEntry').value], x = RULES.exit_rules[$('rExit').value];
+    $('rRuleHelp').textContent = (e ? 'Entry — ' + e.description + ' ' : '') + (x ? 'Exit — ' + x.description : '');
+  }
+
+  async function loadRules() {
+    try {
+      RULES = await PG.api('get', '/api/backtest/rules');
+      var fill = function (sel, dict, def) {
+        sel.innerHTML = '';
+        Object.keys(dict).forEach(function (k) {
+          var o = PG.mk('option', { value: k }, [dict[k].label]); if (k === def) o.selected = true; sel.appendChild(o);
+        });
+      };
+      fill($('rEntry'), RULES.entry_rules || {}, 'squeeze_breakout');
+      fill($('rExit'), RULES.exit_rules || {}, 'guardian');
+      ruleHelp();
+    } catch (e) {
+      $('rRuleHelp').textContent = 'Could not load the rule list: ' + (e && e.message ? e.message : e);
+    }
+    // Sensible defaults: the account size from .env, the first stock you hold.
+    try {
+      var cfg = await PG.api('get', '/api/portfolio/config');
+      if (cfg && isFinite(Number(cfg.account_size))) $('rCapital').value = Math.round(Number(cfg.account_size));
+    } catch (e) { /* keep 100000 */ }
+    try {
+      var pos = await PG.api('get', '/api/portfolio/positions?status=open');
+      if (Array.isArray(pos) && pos.length && !$('rSymbol').value) $('rSymbol').value = String(pos[0].symbol || '');
+    } catch (e) { /* leave blank */ }
+  }
+
+  function rulesForm() {
+    return {
+      symbol: String($('rSymbol').value || '').replace(/^EGX:/i, '').trim().toUpperCase(),
+      entry_rule: $('rEntry').value, exit_rule: $('rExit').value, period: $('rPeriod').value,
+      initial_capital: Number($('rCapital').value) || 100000
+    };
+  }
+
+  function verdictBox(text, warn) {
+    return PG.mk('div', { style: 'font-size:14.5px;line-height:1.55;padding:12px 14px;border:1px solid ' + (warn ? 'rgba(210,164,76,0.5)' : 'rgba(47,191,160,0.4)') + ';border-radius:8px;margin-bottom:12px;background:rgba(255,255,255,0.02)' }, [String(text || '')]);
+  }
+
+  function reasonsNode(reasons) {
+    var r = reasons || {}, keys = Object.keys(r);
+    if (!keys.length) return PG.mk('span', { class: 'pg-muted' }, ['—']);
+    return PG.mk('span', {}, [keys.map(function (k) { return k.replace('_', ' ') + ' ' + r[k]; }).join(' · ')]);
+  }
+
+  function renderRulesRun(p) {
+    var box = $('rulesBox'); box.innerHTML = '';
+    var m = p.metrics || {};
+    box.appendChild(verdictBox(p.verdict, !m.sufficient_sample));
+    var cards = PG.mk('div', { class: 'pg-cards' });
+    cards.appendChild(PG.metricCard('Trades', String(m.trades || 0) + (m.sufficient_sample ? '' : ' (few)')));
+    cards.appendChild(PG.metricCard('Win rate', m.win_rate === null || m.win_rate === undefined ? '—' : PG.num(m.win_rate, 0) + '%' + (m.win_rate_ci95 ? ' (' + m.win_rate_ci95[0] + '–' + m.win_rate_ci95[1] + ')' : '')));
+    cards.appendChild(PG.metricCard('Avg R', m.avg_r === null || m.avg_r === undefined ? '—' : PG.signedNode(m.avg_r, 'R')));
+    cards.appendChild(PG.metricCard('Net result', PG.signedNode(m.net_pnl, ' EGP')));
+    cards.appendChild(PG.metricCard('Total return', PG.pctNode(m.total_return_pct)));
+    cards.appendChild(PG.metricCard('Buy & hold', PG.pctNode(m.buy_hold_pct)));
+    cards.appendChild(PG.metricCard('EGX30', PG.pctNode(p.index_return_pct)));
+    cards.appendChild(PG.metricCard('Max drawdown', m.max_drawdown_pct === undefined ? '—' : '-' + PG.num(m.max_drawdown_pct, 1) + '%'));
+    cards.appendChild(PG.metricCard('Profit factor', m.profit_factor === null || m.profit_factor === undefined ? '—' : (m.profit_factor >= 99 ? 'no losers' : PG.num(m.profit_factor))));
+    var exitsNode = reasonsNode(m.exit_reasons); exitsNode.style.fontSize = '12px'; exitsNode.style.fontWeight = '400';
+    cards.appendChild(PG.metricCard('Exits', exitsNode));
+    box.appendChild(cards);
+    if (m.open_trade) {
+      box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:12px;margin:8px 0' },
+        ['One position is still open at the end of the window: entered ' + m.open_trade.entry_date + ' @ ' + PG.num(m.open_trade.entry)
+         + ', marked ' + PG.num(m.open_trade.mark) + ' (' + PG.num(m.open_trade.r_open) + 'R, not counted in the stats above).']));
+    }
+    if (Array.isArray(p.equity) && p.equity.length) {
+      var wrap = PG.mk('div', { style: 'height:290px;margin:12px 0 16px;overflow:hidden' });
+      box.appendChild(wrap);
+      try { drawEquity(wrap, p.equity); } catch (e) { wrap.textContent = 'Equity curve unavailable.'; }
+    }
+    if (Array.isArray(p.trades) && p.trades.length) {
+      box.appendChild(PG.mk('h3', { style: 'font-size:13px;margin:10px 0 6px' }, ['Trades']));
+      box.appendChild(PG.table(p.trades.slice().reverse(), {
+        columns: [
+          { key: 'entry_date', label: 'Entered', numeric: false }, { key: 'entry', label: 'Entry', numeric: true },
+          { key: 'exit_date', label: 'Exited', numeric: false }, { key: 'exit', label: 'Exit', numeric: true },
+          { key: 'reason', label: 'Why out', numeric: false, render: function (r) { return PG.mk('span', { class: 'badge ' + (/target/.test(r.reason) ? 'up' : (/stop/.test(r.reason) ? 'down' : 'neutral')) }, [String(r.reason).replace('_', ' ')]); } },
+          { key: 'bars', label: 'Sessions', numeric: true, render: function (r) { return PG.mk('span', {}, [String(r.bars)]); } },
+          { key: 'peak_r', label: 'Peak R', numeric: true, render: function (r) { return PG.signedNode(r.peak_r, 'R'); } },
+          { key: 'r', label: 'R', numeric: true, render: function (r) { return PG.signedNode(r.r, 'R'); } },
+          { key: 'pnl', label: 'Net PnL', numeric: true, render: function (r) { return PG.signedNode(r.pnl, ' EGP'); } }
+        ]
+      }));
+    }
+    var c = p.costs || {}, rp = (p.rules || {}).params || {};
+    box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:11.5px;margin-top:8px' },
+      ['Fees ' + c.fee_pct_per_side + '%/side · slippage ' + c.slippage_pct + '% · ' + c.risk_pct_per_trade + '% of equity risked per trade · stop ' + rp.stop_atr + '×ATR · trail ' + rp.trail_atr + '×ATR · target ' + rp.target_r + 'R · time stop ' + rp.time_stop_bars + ' sessions. Yahoo daily closes, not dividend-adjusted.']));
+    box.appendChild(PG.detailsBlock('Full payload', p));
+  }
+
+  async function runRules(ev) {
+    if (ev) ev.preventDefault();
+    var f = rulesForm();
+    if (!f.symbol) { PG.notify('Enter a symbol', 'error'); return; }
+    PG.loading($('rulesBox'), 'Testing ' + f.entry_rule + ' + ' + f.exit_rule + ' on ' + f.symbol + '…');
+    try { renderRulesRun(await PG.api('post', '/api/backtest/rules', f)); }
+    catch (e) { PG.errBox($('rulesBox'), 'Backtest failed: ' + (e && e.message ? e.message : e)); }
+  }
+
+  async function runExits() {
+    var f = rulesForm();
+    if (!f.symbol) { PG.notify('Enter a symbol', 'error'); return; }
+    PG.loading($('rulesBox'), 'Comparing exit styles on ' + f.symbol + '…');
+    try {
+      var p = await PG.api('post', '/api/backtest/rules/exits', f);
+      var box = $('rulesBox'); box.innerHTML = '';
+      box.appendChild(verdictBox(p.summary, !(p.rows && p.rows[0] && p.rows[0].sufficient_sample)));
+      box.appendChild(PG.table(p.rows || [], {
+        columns: [
+          { key: 'label', label: 'Exit style', numeric: false, render: function (r) { return PG.mk('span', { style: r.exit_rule === p.best ? 'font-weight:600' : '' }, [r.label + (r.exit_rule === p.best ? ' ★' : '')]); } },
+          { key: 'trades', label: 'Trades', numeric: true }, { key: 'win_rate', label: 'Win %', numeric: true },
+          { key: 'avg_r', label: 'Avg R', numeric: true, render: function (r) { return PG.signedNode(r.avg_r, 'R'); } },
+          { key: 'expectancy_egp', label: 'Per trade (EGP)', numeric: true, render: function (r) { return PG.signedNode(r.expectancy_egp, ''); } },
+          { key: 'profit_factor', label: 'Profit factor', numeric: true },
+          { key: 'total_return_pct', label: 'Total %', numeric: true, render: function (r) { return PG.pctNode(r.total_return_pct); } },
+          { key: 'max_drawdown_pct', label: 'Max DD %', numeric: true },
+          { key: 'avg_bars', label: 'Avg sessions', numeric: true },
+          { key: 'exit_reasons', label: 'How trades ended', numeric: false, render: function (r) { return reasonsNode(r.exit_reasons); } }
+        ]
+      }));
+      box.appendChild(PG.detailsBlock('Full payload', p));
+    } catch (e) { PG.errBox($('rulesBox'), 'Compare failed: ' + (e && e.message ? e.message : e)); }
+  }
+
+  async function runStops() {
+    var f = rulesForm();
+    if (!f.symbol) { PG.notify('Enter a symbol', 'error'); return; }
+    PG.loading($('rulesBox'), 'Sweeping stop distances on ' + f.symbol + '…');
+    try {
+      var p = await PG.api('post', '/api/backtest/rules/stops', f);
+      var box = $('rulesBox'); box.innerHTML = '';
+      box.appendChild(verdictBox(p.summary, true));
+      box.appendChild(PG.table(p.rows || [], {
+        columns: [
+          { key: 'stop_atr', label: 'Stop (× ATR)', numeric: true, render: function (r) { return PG.mk('span', { style: r.stop_atr === p.best_stop_atr ? 'font-weight:600' : '' }, [PG.num(r.stop_atr, 1) + (p.atr_now ? '  ≈ ' + PG.num(r.stop_atr * p.atr_now) + ' EGP' : '') + (r.stop_atr === p.best_stop_atr ? ' ★' : '')]); } },
+          { key: 'trades', label: 'Trades', numeric: true }, { key: 'win_rate', label: 'Win %', numeric: true },
+          { key: 'stopped_out_pct', label: 'Stopped out %', numeric: true },
+          { key: 'avg_r', label: 'Avg R', numeric: true, render: function (r) { return PG.signedNode(r.avg_r, 'R'); } },
+          { key: 'expectancy_egp', label: 'Per trade (EGP)', numeric: true, render: function (r) { return PG.signedNode(r.expectancy_egp, ''); } },
+          { key: 'total_return_pct', label: 'Total %', numeric: true, render: function (r) { return PG.pctNode(r.total_return_pct); } },
+          { key: 'max_drawdown_pct', label: 'Max DD %', numeric: true }
+        ]
+      }));
+      box.appendChild(PG.detailsBlock('Full payload', p));
+    } catch (e) { PG.errBox($('rulesBox'), 'Stop sweep failed: ' + (e && e.message ? e.message : e)); }
+  }
+
+  async function runUniverse() {
+    var f = rulesForm();
+    var uni = $('rUniverse').value;
+    PG.loading($('rulesBox'), 'Running ' + f.entry_rule + ' + ' + f.exit_rule + ' on every ' + uni + ' stock — about a minute…');
+    try {
+      var p = await PG.api('post', '/api/backtest/rules/universe', { universe: uni, entry_rule: f.entry_rule, exit_rule: f.exit_rule, period: f.period, initial_capital: f.initial_capital, limit: 101 });
+      var box = $('rulesBox'); box.innerHTML = '';
+      var pooled = p.pooled || {};
+      box.appendChild(verdictBox(p.summary, (pooled.trades || 0) < 20));
+      var cards = PG.mk('div', { class: 'pg-cards' });
+      cards.appendChild(PG.metricCard('Pooled trades', String(pooled.trades || 0)));
+      cards.appendChild(PG.metricCard('Pooled win rate', pooled.win_rate === null || pooled.win_rate === undefined ? '—' : PG.num(pooled.win_rate, 0) + '%'));
+      cards.appendChild(PG.metricCard('Pooled avg R', pooled.avg_r === null || pooled.avg_r === undefined ? '—' : PG.signedNode(pooled.avg_r, 'R')));
+      cards.appendChild(PG.metricCard('Median stock result', PG.pctNode(pooled.median_return_pct)));
+      cards.appendChild(PG.metricCard('Beat buy & hold', (pooled.symbols_beat_buy_hold || 0) + ' of ' + (pooled.symbols_traded || 0)));
+      box.appendChild(cards);
+      box.appendChild(PG.table(p.rows || [], {
+        onRow: PG.openStock,
+        columns: [
+          { key: 'symbol', label: 'Symbol', numeric: false }, { key: 'trades', label: 'Trades', numeric: true },
+          { key: 'win_rate', label: 'Win %', numeric: true },
+          { key: 'avg_r', label: 'Avg R', numeric: true, render: function (r) { return PG.signedNode(r.avg_r, 'R'); } },
+          { key: 'total_return_pct', label: 'Rule %', numeric: true, render: function (r) { return PG.pctNode(r.total_return_pct); } },
+          { key: 'buy_hold_pct', label: 'Buy & hold %', numeric: true, render: function (r) { return PG.pctNode(r.buy_hold_pct); } },
+          { key: 'max_drawdown_pct', label: 'Max DD %', numeric: true }
+        ]
+      }));
+      box.appendChild(PG.detailsBlock('Full payload', p));
+    } catch (e) { PG.errBox($('rulesBox'), 'Universe run failed: ' + (e && e.message ? e.message : e)); }
+  }
+
+  async function runReplay() {
+    PG.loading($('rulesBox'), 'Replaying your open positions under the Guardian\'s rules…');
+    try {
+      var p = await PG.api('get', '/api/backtest/rules/replay');
+      var box = $('rulesBox'); box.innerHTML = '';
+      box.appendChild(verdictBox(p.summary, false));
+      box.appendChild(PG.table(p.rows || [], {
+        onRow: PG.openStock,
+        columns: [
+          { key: 'symbol', label: 'Symbol', numeric: false }, { key: 'opened', label: 'Opened', numeric: false },
+          { key: 'entry', label: 'Entry', numeric: true }, { key: 'last', label: 'Now', numeric: true },
+          { key: 'actual_pct', label: 'Holding %', numeric: true, render: function (r) { return PG.pctNode(r.actual_pct); } },
+          { key: 'actual_r', label: 'Holding R', numeric: true, render: function (r) { return PG.signedNode(r.actual_r, 'R'); } },
+          { key: 'plan_status', label: 'Guardian would have…', numeric: false, render: function (r) {
+            var s = String(r.plan_status || r.error || '');
+            return PG.mk('span', { class: 'badge ' + (s === 'still holding' ? 'up' : (/target/.test(s) ? 'accent' : 'down')) }, [s.replace('_', ' ') + (r.plan_exit_date ? ' on ' + r.plan_exit_date : '')]);
+          } },
+          { key: 'plan_pnl', label: 'Plan PnL', numeric: true, render: function (r) { return PG.signedNode(r.plan_pnl, ' EGP'); } },
+          { key: 'actual_pnl', label: 'Holding PnL', numeric: true, render: function (r) { return PG.signedNode(r.actual_pnl, ' EGP'); } },
+          { key: 'index_pct', label: 'EGX30 since', numeric: true, render: function (r) { return PG.pctNode(r.index_pct); } },
+          { key: 'plan_stop_now', label: 'Plan stop now', numeric: true },
+          { key: 'risk_basis', label: 'R measured from', numeric: false }
+        ]
+      }));
+      box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:11.5px;margin-top:8px' },
+        ['Guardian rules in the replay: stop at your initial stop (or 2×ATR at entry when it was above cost), breakeven then 2.5×ATR trail after +1R, take profit at +3R, time stop after 15 flat sessions. Prices are Yahoo daily closes.']));
+      box.appendChild(PG.detailsBlock('Full payload', p));
+    } catch (e) { PG.errBox($('rulesBox'), 'Replay failed: ' + (e && e.message ? e.message : e)); }
+  }
+
   function init() {
+    $('rulesForm').addEventListener('submit', runRules);
+    $('rExitsBtn').addEventListener('click', runExits);
+    $('rStopsBtn').addEventListener('click', runStops);
+    $('rUniverseBtn').addEventListener('click', runUniverse);
+    $('rReplayBtn').addEventListener('click', runReplay);
+    $('rEntry').addEventListener('change', ruleHelp);
+    $('rExit').addEventListener('change', ruleHelp);
+    loadRules();
     PG.boot('backtest');
     $('btForm').addEventListener('submit', runSingle);
     $('compareBtn').addEventListener('click', runCompare);

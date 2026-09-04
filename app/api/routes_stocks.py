@@ -76,6 +76,39 @@ async def stock_history(
         return {"error": str(exc)}
 
 
+@router.get("/{symbol}/levels")
+async def stock_levels(symbol: str) -> dict[str, Any]:
+    """Support & resistance zones (tested swing clusters, 52w extremes, round numbers, SMAs)."""
+    try:
+        from app.services import levels
+
+        return await asyncio.to_thread(levels.compute, symbol)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
+@router.get("/{symbol}/checklist")
+async def stock_checklist(symbol: str) -> dict[str, Any]:
+    """Six-pillar decision checklist: trend, S/R, volume, price action, patterns, risk plan."""
+    try:
+        from app.services import checklist
+
+        return await asyncio.to_thread(checklist.checklist, symbol)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
+@router.get("/{symbol}/patterns")
+async def stock_patterns(symbol: str) -> dict[str, Any]:
+    """Chart patterns (double/triple bottom/top, head & shoulders, cup) on the daily chart."""
+    try:
+        from app.services import patterns
+
+        return await asyncio.to_thread(patterns.detect, symbol)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
 # ── Watchlist ────────────────────────────────────────────────────────────────
 
 class WatchlistAdd(BaseModel):

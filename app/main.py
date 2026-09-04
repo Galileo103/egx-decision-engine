@@ -132,6 +132,21 @@ _ALLOWED_HOSTS = {
 
 
 @app.middleware("http")
+async def no_stale_pages(request: Request, call_next: Any) -> Any:
+    """Static pages and assets must always revalidate.
+
+    Without an explicit Cache-Control the browser heuristically caches
+    HTML/JS/CSS for hours, so after an update the user keeps seeing the OLD
+    page (a fresh backend answering a stale frontend — confusing 422s and
+    missing panels). ETag/Last-Modified still make revalidation cheap.
+    """
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+@app.middleware("http")
 async def block_cross_origin_writes(request: Request, call_next: Any) -> Any:
     """Reject state-changing requests that originate from another site.
 

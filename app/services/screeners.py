@@ -423,6 +423,31 @@ def _family_count(scanners: list[str]) -> int:
     return len({_SCANNER_FAMILY.get(s, s) for s in scanners})
 
 
+def _evidence_weight(scanners: list[str], weights: dict[str, float]) -> float:
+    """Track-record-weighted evidence: one term per signal FAMILY, using the
+    best-performing scanner's weight inside that family (1.0 = no record yet).
+
+    With no scorecard data every family weighs 1.0, so this equals
+    ``_family_count`` and the ranking is unchanged until proof accumulates.
+    """
+    per_family: dict[str, float] = {}
+    for s in scanners:
+        fam = _SCANNER_FAMILY.get(s, s)
+        w = float(weights.get(s, 1.0))
+        per_family[fam] = max(per_family.get(fam, 0.0), w)
+    return round(sum(per_family.values()), 2)
+
+
+def _signal_weights() -> dict[str, float]:
+    try:
+        from app.services import scorecard
+
+        return scorecard.signal_weights()
+    except Exception as exc:  # noqa: BLE001 — ranking must never depend on the scorecard being healthy
+        logger.warning("signal weights unavailable: %s", exc)
+        return {}
+
+
 def candidates(timeframe: str = "1D", persist: bool = False) -> dict:
     """Merged multi-scanner candidate list — the flagship screen.
 
@@ -517,11 +542,14 @@ def candidates(timeframe: str = "1D", persist: bool = False) -> dict:
             if price_data.get("change_percent") is not None:
                 entry["change_pct"] = price_data["change_percent"]
 
+        weights = _signal_weights()
+
         def _final_key(e: dict) -> tuple:
             score = e.get("score")
             return (
-                _family_count(e["scanners"]),   # independent evidence first
-                len(e["scanners"]),             # raw hits break family ties
+                _evidence_weight(e["scanners"], weights),  # proven evidence first
+                _family_count(e["scanners"]),              # independent evidence
+                len(e["scanners"]),                        # raw hits break family ties
                 score if isinstance(score, (int, float)) else -1.0,
                 e["change_pct"] if e["change_pct"] is not None else 0.0,
             )
@@ -549,6 +577,7 @@ def candidates(timeframe: str = "1D", persist: bool = False) -> dict:
                 "scanners": entry["scanners"],
                 "hit_count": len(entry["scanners"]),
                 "family_count": _family_count(entry["scanners"]),
+                "evidence_weight": _evidence_weight(entry["scanners"], weights),
                 "score": entry.get("score"),
                 "grade": entry.get("grade"),
                 "price": entry.get("price"),
@@ -569,6 +598,12 @@ def candidates(timeframe: str = "1D", persist: bool = False) -> dict:
             "scored_top_n": min(_SCORE_TOP_N, len(ranked)),
             "filtered_illiquid": filtered_illiquid,
             "min_daily_value_egp": min_value,
+            "signal_weights": weights,
+            "ranking_basis": (
+                "Ranked by track-record-weighted evidence (sum over signal families of the "
+                "scanner's Scorecard weight; 1.0 until a scanner has enough graded hits), then "
+                "family count, raw hits, score, change."
+            ),
         }
     except Exception as exc:
         logger.exception("candidates() failed")
@@ -578,6 +613,62 @@ def candidates(timeframe: str = "1D", persist: bool = False) -> dict:
             "as_of": as_of,
             "scanner_errors": scanner_errors,
         }
+
+
+def latest_candidates(limit: int = 20) -> dict:
+    """Candidates rebuilt from the most recent persisted scanner hits — instant,
+    no upstream calls. The dashboard shows this first and offers a live rescan.
+    Pattern hits (``pattern_*``) are excluded: they have their own tab."""
+    try:
+        from app import db
+
+        d = db.query("SELECT MAX(date) AS d FROM scanner_hits WHERE scanner NOT LIKE 'pattern_%'")
+        date = d[0].get("d") if d else None
+        if not date:
+            return {"candidates": [], "as_of": None, "stored": True, "count": 0}
+        rows = db.query(
+            "SELECT scanner, symbol, payload_json FROM scanner_hits "
+            "WHERE date = ? AND scanner NOT LIKE 'pattern_%'", (date,)
+        )
+        merged: dict[str, dict] = {}
+        for r in rows:
+            sym = _bare_symbol(r.get("symbol"))
+            if not sym:
+                continue
+            try:
+                payload = json.loads(r.get("payload_json") or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            e = merged.setdefault(sym, {"symbol": sym, "scanners": [], "price": None, "change_pct": None,
+                                        "score": None, "signal": None})
+            key = str(r.get("scanner"))
+            if key not in e["scanners"]:
+                e["scanners"].append(key)
+            if isinstance(payload, dict):
+                price, change = _row_price_change(key, payload)
+                if e["price"] is None and price is not None:
+                    e["price"] = price
+                if e["change_pct"] is None and change is not None:
+                    e["change_pct"] = change
+                for k in ("score", "stock_score"):
+                    if e["score"] is None and isinstance(payload.get(k), (int, float)):
+                        e["score"] = payload.get(k)
+                if e["signal"] is None and isinstance(payload.get("signal"), str):
+                    e["signal"] = payload.get("signal")
+        weights = _signal_weights()
+        out = []
+        for e in merged.values():
+            e["hit_count"] = len(e["scanners"])
+            e["family_count"] = _family_count(e["scanners"])
+            e["evidence_weight"] = _evidence_weight(e["scanners"], weights)
+            out.append(e)
+        out.sort(key=lambda e: (e["evidence_weight"], e["family_count"], e["hit_count"],
+                                e["score"] if isinstance(e.get("score"), (int, float)) else -1.0),
+                 reverse=True)
+        return {"candidates": out[:max(1, int(limit))], "as_of": date, "stored": True,
+                "count": len(out), "signal_weights": weights}
+    except Exception as exc:
+        return {"error": str(exc), "candidates": [], "stored": True}
 
 
 def _persist_hits(entries: list[dict]) -> None:

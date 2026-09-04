@@ -323,9 +323,36 @@ include all routers, then `app.mount("/", StaticFiles(directory="web", html=True
 | POST /api/alerts/evaluate | alerts.evaluate_all |
 | POST /api/portfolio/size | portfolio.size_position |
 | GET /api/portfolio/positions?status= | portfolio.list_positions |
-| POST /api/portfolio/positions | portfolio.open_position |
+| POST /api/portfolio/positions | portfolio.open_position (stop/targets/note optional → filled from plan_defaults) |
+| GET /api/portfolio/plan-defaults/{symbol}?entry= | portfolio.plan_defaults (stop/targets/note from the stock's trade plan) |
 | POST /api/portfolio/positions/{id}/close | portfolio.close_position |
+| POST /api/portfolio/positions/{id}/update | portfolio.update_position (current stop / targets / note; initial_stop untouched) |
+| DELETE /api/portfolio/positions/{id} | portfolio.delete_position (erase a mistaken record; refused if partial sales exist) |
+| POST /api/portfolio/positions/{id}/fill | portfolio.adjust_position (qty>0 buy → blended entry; qty<0 partial sell → realized PnL; whole qty → close) |
+| GET /api/portfolio/fills?position_id=&limit= | portfolio.position_fills (fill journal) |
 | GET /api/portfolio/performance | portfolio.performance |
+| GET /api/backtest/rules | rules_backtest catalog (entry/exit rules, defaults) |
+| POST /api/backtest/rules | rules_backtest.run (app's own entry+exit rules, plain-language verdict) |
+| POST /api/backtest/rules/exits | rules_backtest.compare_exits |
+| POST /api/backtest/rules/stops | rules_backtest.stop_sweep |
+| POST /api/backtest/rules/universe | rules_backtest.universe_run |
+| GET /api/backtest/rules/replay | rules_backtest.replay_positions (open positions under Guardian rules) |
+| GET /api/screener/scorecard | scorecard.scorecard (per-scanner 5/10/20d track record + weights) |
+| POST /api/screener/scorecard/grade | scorecard.grade (grade pending scanner_hits) |
+| GET /api/screener/scorecard/outcomes?scanner=&symbol=&limit= | scorecard.outcomes |
+| GET /api/screener/setups?limit=&min_score= | setups.latest (stored six-pillar checklist across candidates/leaders/watchlist/holdings) |
+| POST /api/screener/setups/refresh | setups.compute(persist=True) |
+| GET /api/screener/leaders?universe=&limit= | leaders.latest (stored RS ranking) |
+| GET /api/screener/patterns?universe=&status=&category= | patterns.latest (stored pattern scan, 7 categories) |
+| GET /api/screener/patterns/catalog | patterns.catalog (all ~75 patterns: category, direction, kind, tiers, EGX stats) |
+| POST /api/screener/patterns/refresh | patterns.compute(persist=True) |
+| GET /api/stocks/{symbol}/patterns | patterns.detect (one symbol, live) |
+| GET /api/stocks/{symbol}/levels | levels.compute (tested S/R zones, 52w, round numbers, SMAs) |
+| GET /api/stocks/{symbol}/checklist | checklist.checklist (six-pillar decision checklist) |
+| POST /api/screener/leaders/refresh | leaders.compute(persist=True) |
+| GET /api/portfolio/guardian | guardian.evaluate(persist=False, notify=False) |
+| POST /api/portfolio/guardian/run | guardian.evaluate(persist=True, notify=body.notify) |
+| GET /api/portfolio/guardian/history?position_id=&limit= | guardian.history |
 | POST /api/brief/morning | briefs.morning_brief |
 | POST /api/brief/thesis/{symbol} | briefs.stock_thesis |
 | GET /api/brief/latest?kind=&symbol= | briefs.latest |

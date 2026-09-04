@@ -64,6 +64,16 @@
         </div>
 
         <div style="min-width:0">
+          <div class="card" id="check-card">
+            <div class="card-title"><span>Decision checklist</span><span class="as-of muted" id="check-asof"></span></div>
+            <div id="check-box"><div class="loading-pill">Checking six pillars…</div></div>
+          </div>
+
+          <div class="card" id="pos-card" style="display:none">
+            <div class="card-title"><span>Your position</span><span class="as-of muted" id="pos-asof"></span></div>
+            <div id="pos-box"></div>
+          </div>
+
           <div class="card">
             <div class="card-title"><span>Score</span></div>
             <div id="score-box"></div>
@@ -72,6 +82,16 @@
           <div class="card">
             <div class="card-title"><span>Trade plan</span></div>
             <div id="plan-box"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-title"><span>Support &amp; resistance</span><span class="as-of muted" id="lv-asof"></span></div>
+            <div id="lv-box"><div class="loading-pill">Finding levels…</div></div>
+          </div>
+
+          <div class="card">
+            <div class="card-title"><span>Chart patterns</span><span class="as-of muted" id="pat-asof"></span></div>
+            <div id="pat-box"><div class="loading-pill">Scanning…</div></div>
           </div>
 
           <div class="card">
@@ -109,7 +129,7 @@
   var SYMBOL = (new URLSearchParams(window.location.search).get("symbol") || "")
     .trim().toUpperCase().replace(/^EGX:/, "");
 
-  var state = { detail: null, plan: null, inWatchlist: false, tabLoaded: {} };
+  var state = { detail: null, plan: null, position: null, patterns: null, levels: null, inWatchlist: false, tabLoaded: {} };
 
   var ENTRY_KEYS = ["entry", "entry_price", "buy_price", "buy_at", "entry_level", "buy"];
   var STOP_KEYS = ["stop", "stop_loss", "sl", "stoploss", "stop_price", "stop_level"];
@@ -131,6 +151,8 @@
 
     loadDetail();
     loadChart();
+    loadChecklist();
+    loadLevels();
     loadMtf();
     loadWatchlistState();
     setupTabs();
@@ -168,11 +190,221 @@
       renderPlan(planBox, state.detail);
       applyPlanOverlays();
       prefillSizer();
+      loadPosition();
+      loadPatterns();
     }).catch(function (e) {
       U.clear(scoreBox).appendChild(U.errorBox("Analysis: " + e.message));
       U.clear(planBox).appendChild(U.errorBox("Trade plan: " + e.message));
       document.getElementById("sh-chg").textContent = "";
       document.getElementById("sh-price").textContent = "—";
+    });
+  }
+
+  /* ---------- your position (from the Guardian) ---------- */
+
+  var SEVERITY_BADGE = { critical: "sell", action: "buy", warning: "neutral", advice: "neutral", ok: "buy" };
+
+  function loadPosition() {
+    API.get("/api/portfolio/guardian").then(function (g) {
+      var rows = (g && Array.isArray(g.verdicts) ? g.verdicts : []).filter(function (r) {
+        return r && String(r.symbol || "").toUpperCase() === SYMBOL;
+      });
+      state.position = rows.length ? rows : null;
+      renderPosition(rows, g && g.as_of);
+      applyPlanOverlays();
+    }).catch(function () { /* portfolio unavailable — the page still works without it */ });
+  }
+
+  function renderPosition(rows, asOf) {
+    var card = document.getElementById("pos-card");
+    var box = document.getElementById("pos-box");
+    if (!rows || !rows.length) { card.style.display = "none"; return; }
+    card.style.display = "";
+    document.getElementById("pos-asof").textContent = asOf ? "guardian " + String(asOf).slice(11, 16) : "";
+    U.clear(box);
+    rows.forEach(function (r) {
+      var wrap = el("div", { style: "margin-bottom:10px" });
+      var head = el("div", { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px" });
+      head.appendChild(el("span", { class: "badge " + (SEVERITY_BADGE[r.severity] || "neutral"), text: String(r.verdict || "—").replace(/_/g, " ") }));
+      head.appendChild(el("span", { class: "muted", text: "#" + r.position_id + " · " + fmtNum(r.qty) + " sh @ " + fmtNum(r.entry) }));
+      wrap.appendChild(head);
+      var dl = el("dl", { class: "kv" });
+      var add = function (k, v) { dl.appendChild(el("dt", { text: k })); dl.appendChild(el("dd", { text: v })); };
+      add("Mark", r.mark === null || r.mark === undefined ? "—" : fmtNum(r.mark) + (r.mark_source ? " (" + String(r.mark_source).replace(/_/g, " ") + ")" : ""));
+      add("Stop", r.stop === null || r.stop === undefined ? "—" : fmtNum(r.stop));
+      add("R now", r.r_now === null || r.r_now === undefined ? "n/a" : (r.r_now > 0 ? "+" : "") + fmtNum(r.r_now) + "R");
+      add("Peak R", r.peak_r === null || r.peak_r === undefined ? "n/a" : (r.peak_r > 0 ? "+" : "") + fmtNum(r.peak_r) + "R");
+      add("Unrealized", r.unrealized_pct === null || r.unrealized_pct === undefined ? "—" : (r.unrealized_pct > 0 ? "+" : "") + fmtNum(r.unrealized_pct) + "%");
+      if (r.suggested_stop !== null && r.suggested_stop !== undefined) add("Suggested stop", fmtNum(r.suggested_stop));
+      add("Held", (r.bars_held || 0) + " sessions");
+      wrap.appendChild(dl);
+      (r.reasons || []).forEach(function (t) {
+        wrap.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-top:4px", text: String(t) }));
+      });
+      if (r.note) wrap.appendChild(el("div", { style: "font-size:12px;margin-top:6px;font-style:italic", text: "Your note: " + r.note }));
+      box.appendChild(wrap);
+    });
+    var link = el("a", { href: "/portfolio.html", class: "muted", style: "font-size:12px", text: "Manage on the portfolio page →" });
+    box.appendChild(link);
+  }
+
+  /* ---------- decision checklist ---------- */
+
+  var STATUS_ICON = { pass: "\u2713", warn: "\u26A0", fail: "\u2717" };
+  var STATUS_CLASS = { pass: "up", warn: "neutral", fail: "sell" };
+
+  function loadChecklist() {
+    var box = document.getElementById("check-box");
+    API.get("/api/stocks/" + encodeURIComponent(SYMBOL) + "/checklist").then(function (c) {
+      U.clear(box);
+      if (!c || c.error) { box.appendChild(el("div", { class: "muted", text: "Checklist unavailable: " + (c && c.error) })); return; }
+      document.getElementById("check-asof").textContent = c.as_of ? "daily · " + c.as_of : "";
+      var verdictCls = c.verdict === "setup" ? "up" : (c.verdict === "no_setup" ? "sell" : "neutral");
+      var head = el("div", { style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px" });
+      head.appendChild(el("span", { class: "badge " + verdictCls, text: (c.verdict === "setup" ? "SETUP" : (c.verdict === "no_setup" ? "NO SETUP" : "WATCH")) }));
+      head.appendChild(el("span", { style: "font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:600", text: c.score + "/6" }));
+      box.appendChild(head);
+      box.appendChild(el("div", { style: "font-size:13.5px;margin-bottom:10px", text: c.headline }));
+      var list = el("div", { class: "check-list" });
+      (c.pillars || []).forEach(function (p) {
+        var row = el("div", { class: "check-row" });
+        row.appendChild(el("span", { class: "check-icon badge " + (STATUS_CLASS[p.status] || "neutral"), text: STATUS_ICON[p.status] || "?" }));
+        var body = el("div", { class: "check-body" });
+        body.appendChild(el("div", { class: "check-label", text: p.label }));
+        body.appendChild(el("div", { class: "muted check-text", text: p.text }));
+        row.appendChild(body);
+        list.appendChild(row);
+      });
+      box.appendChild(list);
+      var rp = c.risk_plan || {};
+      if (rp.stop) {
+        var plan = el("div", { class: "muted", style: "font-size:11.5px;margin-top:8px" });
+        plan.textContent = "Levels-based plan: entry " + fmtNum(rp.entry) + " · stop " + fmtNum(rp.stop) + " (" + fmtNum(rp.stop_pct) + "%) · target " + fmtNum(rp.target) + (rp.rr !== null && rp.rr !== undefined ? " · " + fmtNum(rp.rr) + "R" : "") + (rp.shares_at_risk_pct ? " · " + rp.shares_at_risk_pct + " shares at your risk %" : "");
+        box.appendChild(plan);
+        // Offer the plan to the sizer.
+        var sizerEntry = document.getElementById("ps-entry"), sizerStop = document.getElementById("ps-stop");
+        if (sizerEntry && sizerStop && !sizerEntry.value) { sizerEntry.value = rp.entry; sizerStop.value = rp.stop; }
+      }
+    }).catch(function (e) {
+      U.clear(box).appendChild(el("div", { class: "muted", text: "Checklist unavailable: " + e.message }));
+    });
+  }
+
+  /* ---------- support & resistance ---------- */
+
+  function loadLevels() {
+    var box = document.getElementById("lv-box");
+    API.get("/api/stocks/" + encodeURIComponent(SYMBOL) + "/levels").then(function (lv) {
+      U.clear(box);
+      if (!lv || lv.error) { box.appendChild(el("div", { class: "muted", text: "Levels unavailable: " + (lv && lv.error) })); return; }
+      state.levels = lv;
+      document.getElementById("lv-asof").textContent = lv.as_of ? "daily · " + lv.as_of : "";
+      var posCls = lv.position === "at support" || lv.position === "breaking out" ? "up" : (lv.position === "at resistance" ? "sell" : "neutral");
+      var head = el("div", { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px" });
+      head.appendChild(el("span", { class: "badge " + posCls, text: String(lv.position || "").toUpperCase() }));
+      if (lv.room_up_pct !== null && lv.room_up_pct !== undefined) head.appendChild(el("span", { class: "muted", style: "font-size:12px", text: "room up " + fmtNum(lv.room_up_pct) + "% · room down " + fmtNum(lv.room_down_pct) + "%" }));
+      box.appendChild(head);
+      box.appendChild(el("div", { class: "muted", style: "font-size:12.5px;margin-bottom:8px", text: lv.note || "" }));
+      var grid = el("div", { class: "lv-grid" });
+      var col = function (title, rows, cls) {
+        var c = el("div");
+        c.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px", text: title }));
+        if (!rows.length) c.appendChild(el("div", { class: "muted", text: "none within a year" }));
+        rows.slice(0, 4).forEach(function (r) {
+          var line = el("div", { class: "lv-row" });
+          line.appendChild(el("span", { class: "lv-price " + cls, text: fmtNum(r.level) }));
+          line.appendChild(el("span", { class: "muted lv-meta", text: (r.distance_pct > 0 ? "+" : "") + fmtNum(r.distance_pct) + "% · " + r.source + (r.touches ? " · tested " + r.touches + "x" : "") + (r.last_touch ? " · " + r.last_touch : "") }));
+          c.appendChild(line);
+        });
+        return c;
+      };
+      grid.appendChild(col("Resistance above", lv.resistances || [], "down"));
+      grid.appendChild(col("Support below", lv.supports || [], "up"));
+      box.appendChild(grid);
+      box.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:8px", text: "Tested zones (2+ touches) are drawn on the chart. " + (lv.basis || "") }));
+      applyPlanOverlays();
+    }).catch(function (e) {
+      U.clear(box).appendChild(el("div", { class: "muted", text: "Levels unavailable: " + e.message }));
+    });
+  }
+
+  /* ---------- chart patterns ---------- */
+
+  function loadPatterns() {
+    var box = document.getElementById("pat-box");
+    API.get("/api/stocks/" + encodeURIComponent(SYMBOL) + "/patterns").then(function (p) {
+      var rows = p && Array.isArray(p.patterns) ? p.patterns : [];
+      state.patterns = rows;
+      document.getElementById("pat-asof").textContent = p && p.as_of ? "daily · " + p.as_of : "";
+      U.clear(box);
+      if (p && p.error && !rows.length) {
+        box.appendChild(el("div", { class: "muted", text: "Patterns unavailable: " + p.error }));
+        return;
+      }
+      if (!rows.length) {
+        box.appendChild(el("div", { class: "muted", text: "No chart shape, candlestick or price-action pattern on the daily chart right now." }));
+        return;
+      }
+      // Shapes first, then price action, candlesticks last; confirmed before forming.
+      var ORDER = { reversal: 0, triangle: 1, wedge: 2, channel: 3, continuation: 4, price_action: 5, candlestick: 6 };
+      rows.sort(function (a, b) {
+        var c = (ORDER[a.category] || 9) - (ORDER[b.category] || 9);
+        if (c) return c;
+        if ((a.status === "confirmed") !== (b.status === "confirmed")) return a.status === "confirmed" ? -1 : 1;
+        return (b.quality || 0) - (a.quality || 0);
+      });
+      var nShape = rows.filter(function (r) { return ORDER[r.category] <= 4; }).length;
+      var nPA = rows.filter(function (r) { return r.category === "price_action"; }).length;
+      var nC = rows.filter(function (r) { return r.category === "candlestick"; }).length;
+      box.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px", text: [
+        nShape ? nShape + " chart shape" + (nShape > 1 ? "s" : "") : null,
+        nPA ? nPA + " price-action event" + (nPA > 1 ? "s" : "") : null,
+        nC ? nC + " candlestick" + (nC > 1 ? "s" : "") : null].filter(Boolean).join(" · ") }));
+      var MAX_VISIBLE = 6;
+      var list = el("div");
+      rows.forEach(function (r, idx) {
+        var item = el("details", { class: "pat-item" });
+        if (idx >= MAX_VISIBLE) { item.setAttribute("data-extra", "1"); item.style.display = "none"; }
+        var head = el("summary", { class: "pat-summary" });
+        head.appendChild(el("strong", { text: r.label + (r.broke === "up" ? " ↑ broke up" : (r.broke === "down" ? " ↓ broke down" : "")) }));
+        head.appendChild(el("span", { class: "badge " + (r.direction === "bullish" ? "buy" : (r.direction === "bearish" ? "sell" : "neutral")), text: r.direction }));
+        head.appendChild(el("span", { class: "badge " + (r.status === "confirmed" ? "up" : "neutral"), text: r.status }));
+        var gist = [];
+        if (r.target !== null && r.target !== undefined && r.target_pct !== null && r.target_pct !== undefined) gist.push("target " + fmtNum(r.target) + " (" + (r.target_pct > 0 ? "+" : "") + fmtNum(r.target_pct) + "%)");
+        else if (r.neckline !== null && r.neckline !== undefined) gist.push("trigger " + fmtNum(r.neckline));
+        gist.push("q " + Math.round(r.quality || 0));
+        head.appendChild(el("span", { class: "muted pat-gist", text: gist.join(" · ") }));
+        item.appendChild(head);
+        var body = el("div", { class: "pat-body" });
+        body.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: String(r.category || "").replace("_", " ") + " · " + (r.kind || "") + " · reliability " + (r.reliability || "?") + " · " + (r.frequency || "") }));
+        var dl = el("dl", { class: "kv" });
+        var add = function (k, v) { if (v === null || v === undefined || v === "") return; dl.appendChild(el("dt", { text: k })); dl.appendChild(el("dd", { text: v })); };
+        if (r.neckline !== null && r.neckline !== undefined) add("Trigger / neckline", fmtNum(r.neckline) + (r.distance_to_neckline_pct !== null && r.distance_to_neckline_pct !== undefined ? " (" + (r.distance_to_neckline_pct > 0 ? "+" : "") + fmtNum(r.distance_to_neckline_pct) + "% away)" : ""));
+        if (r.target !== null && r.target !== undefined) add("Target", fmtNum(r.target) + (r.target_pct !== null && r.target_pct !== undefined ? " (" + (r.target_pct > 0 ? "+" : "") + fmtNum(r.target_pct) + "%)" : ""));
+        if (r.stop_hint !== null && r.stop_hint !== undefined) add("Stop hint", fmtNum(r.stop_hint));
+        if (r.move_progress_pct !== null && r.move_progress_pct !== undefined) add("Move done", fmtNum(r.move_progress_pct) + "%");
+        if (r.break_date) add("Break", r.break_date + (r.break_volume_ratio ? " · volume " + fmtNum(r.break_volume_ratio) + "× avg" : ""));
+        if (r.trigger_up !== undefined && r.trigger_up !== null) add("Triggers", "above " + fmtNum(r.trigger_up) + " / below " + fmtNum(r.trigger_down));
+        add("Points", (r.points || []).map(function (pt) { return pt.label + " " + fmtNum(pt.price) + " (" + pt.time + ")"; }).join(" · "));
+        body.appendChild(dl);
+        if (r.note) body.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:6px", text: r.note }));
+        item.appendChild(body);
+        list.appendChild(item);
+      });
+      box.appendChild(list);
+      if (rows.length > MAX_VISIBLE) {
+        var more = el("button", { class: "btn small", style: "margin-top:6px", text: "Show all " + rows.length });
+        more.addEventListener("click", function () {
+          var extra = list.querySelectorAll("[data-extra]");
+          for (var k = 0; k < extra.length; k++) extra[k].style.display = "";
+          more.remove();
+        });
+        box.appendChild(more);
+      }
+      box.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:8px", text: "Chart shapes are drawn on the chart (neckline + target). A finder, not a judge — the break with volume is the signal." }));
+      applyPlanOverlays();
+    }).catch(function (e) {
+      U.clear(box).appendChild(el("div", { class: "muted", text: "Patterns unavailable: " + e.message }));
     });
   }
 
@@ -474,6 +706,19 @@
   function loadChart() {
     API.get("/api/stocks/" + encodeURIComponent(SYMBOL) + "/history?range=1y&interval=1d").then(function (h) {
       chartCandles = U.firstArray(h, ["candles", "history", "data"]) || [];
+      // Header fallback: the analysis call (TradingView) can be slow or
+      // rate-limited; the chart's last close is available right now.
+      var priceEl = document.getElementById("sh-price");
+      if (chartCandles.length && (priceEl.textContent === "—" || priceEl.textContent === "")) {
+        var lastC = chartCandles[chartCandles.length - 1], prevC = chartCandles[chartCandles.length - 2];
+        var lc = U.toNum(lastC && lastC.close), pc = U.toNum(prevC && prevC.close);
+        if (lc !== null) {
+          priceEl.textContent = fmtNum(lc);
+          priceEl.title = "last daily close " + (lastC.time || "") + " (Yahoo) — live analysis still loading";
+          var chgEl = document.getElementById("sh-chg");
+          if (pc && chgEl && !chgEl.textContent.trim()) { chgEl.textContent = ""; chgEl.appendChild(fmtPct((lc / pc - 1) * 100)); }
+        }
+      }
       applyPlanOverlays();
       var n = chartCandles.length;
       if (n) document.getElementById("chart-note").textContent = n + " candles";
@@ -492,10 +737,38 @@
     if (lv.stop !== null) overlays.push({ price: lv.stop, title: "stop", color: "#E5534B" });
     if (lv.t1 !== null) overlays.push({ price: lv.t1, title: "T1", color: "#34C77B" });
     if (lv.t2 !== null) overlays.push({ price: lv.t2, title: "T2", color: "#34C77B" });
-    fibLevelList(fibOf(state.detail || {})).slice(0, 5).forEach(function (f) {
+    // Your own position: where you actually got in and where your stop sits.
+    (state.position || []).forEach(function (p) {
+      var e = U.toNum(p.entry), s = U.toNum(p.stop), sug = U.toNum(p.suggested_stop);
+      if (e !== null) overlays.push({ price: e, title: "YOU @ " + fmtNum(e), color: "#E8E6DE", dashed: true });
+      if (s !== null) overlays.push({ price: s, title: "your stop", color: "#E5534B", dashed: true });
+      if (sug !== null) overlays.push({ price: sug, title: "suggested stop", color: "#D2A44C", dashed: true });
+    });
+    ((state.levels && state.levels.key_levels) || []).slice(0, 4).forEach(function (l) {
+      var isSup = l.level < (state.levels.price || 0);
+      overlays.push({ price: l.level, title: (isSup ? "support" : "resistance") + " x" + l.touches, color: isSup ? "#3F8F6B" : "#9B4F4A", dashed: true });
+    });
+    var SHAPE_CATS = { reversal: 1, triangle: 1, wedge: 1, channel: 1, continuation: 1 };
+    (state.patterns || []).filter(function (r) { return SHAPE_CATS[r.category] && r.neckline !== null; }).slice(0, 2).forEach(function (r) {
+      var nk = U.toNum(r.neckline), tg = U.toNum(r.target);
+      var short = String(r.label || r.pattern || "pattern").replace("Inverse Head & Shoulders", "inv H&S").replace("Head & Shoulders", "H&S");
+      if (nk !== null) overlays.push({ price: nk, title: short + " neckline", color: "#7FB3FF", dashed: true });
+      if (tg !== null) overlays.push({ price: tg, title: short + " target", color: "#7FB3FF", dashed: true });
+    });
+    fibLevelList(fibOf(state.detail || {})).slice(0, 3).forEach(function (f) {
       overlays.push({ price: f.price, title: "fib " + f.label, color: "#D2A44C" });
     });
-    Charts.renderCandles("chart", chartCandles, overlays);
+    // Collapse labels that would print on top of each other (within 0.3%);
+    // your own levels and the plan's stop/entry win over decorations.
+    var PRIORITY = { "YOU @": 0, "your stop": 0, "suggested stop": 0, entry: 1, stop: 1, T1: 2, T2: 2 };
+    function prio(o) { for (var k in PRIORITY) { if (o.title.indexOf(k) === 0) return PRIORITY[k]; } return 3; }
+    overlays.sort(function (a, b) { return prio(a) - prio(b); });
+    var kept = [];
+    overlays.forEach(function (o) {
+      var clash = kept.some(function (k) { return Math.abs(k.price - o.price) / Math.max(1e-9, k.price) < 0.003; });
+      if (!clash) kept.push(o);
+    });
+    Charts.renderCandles("chart", chartCandles, kept);
   }
 
   /** Extract [{label, price}] from whatever shape the fibonacci payload takes. */
@@ -724,12 +997,46 @@
   }
 
   function renderSmart(c, sm) {
-    var verdict = U.pick(sm, ["verdict", "signal", "conclusion", "smart_money_signal", "summary"]);
-    if (verdict !== null && verdict !== undefined && typeof verdict !== "object") {
-      var cls = /accum|buy|bull|inflow/i.test(String(verdict)) ? "up" : /distrib|sell|bear|outflow/i.test(String(verdict)) ? "down" : "neutral";
-      c.appendChild(el("div", { style: { marginBottom: "10px" } }, el("span", { class: "badge " + cls, text: String(verdict) })));
+    if (!sm || typeof sm !== "object" || sm.error) {
+      c.appendChild(U.errorBox("Smart money: " + ((sm && sm.error) || "unavailable")));
+      return;
     }
-    c.appendChild(U.renderObject(sm));
+    var consensus = U.pick(sm, ["consensus"]) || {};
+    var flow = U.pick(sm, ["volume_flow_composite", "volume_flow", "composite"]) || {};
+    var banker = U.pick(sm, ["banker_fund_oscillator", "banker_oscillator"]) || {};
+    var mcdx = U.pick(sm, ["mcdx_style", "mcdx"]) || {};
+    var read = U.pick(consensus, ["read", "verdict", "signal"]) || U.pick(sm, ["verdict", "signal", "conclusion", "summary"]);
+    var cls = /accum|buy|bull|inflow|smart_money_in/i.test(String(read)) ? "up" : /distrib|sell|bear|outflow|smart_money_out/i.test(String(read)) ? "down" : "neutral";
+    var plain = {
+      SMART_MONEY_IN: "Institutions appear to be buying — volume behaves like accumulation.",
+      SMART_MONEY_OUT: "Institutions appear to be selling — volume behaves like distribution.",
+      ACCUMULATION: "Volume behaves like quiet accumulation.",
+      DISTRIBUTION: "Volume behaves like distribution into strength.",
+    };
+    var head = el("div", { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap", marginBottom: "8px" } });
+    if (read) head.appendChild(el("span", { class: "badge " + cls, text: String(read).replace(/_/g, " ") }));
+    var votesB = U.pickNum(consensus, ["bullish_votes"]), votesS = U.pickNum(consensus, ["bearish_votes"]);
+    if (votesB !== null || votesS !== null) head.appendChild(el("span", { class: "muted", text: "votes: " + (votesB || 0) + " bullish · " + (votesS || 0) + " bearish" }));
+    c.appendChild(head);
+    if (read && plain[String(read).toUpperCase()]) c.appendChild(el("div", { style: { marginBottom: "10px" }, text: plain[String(read).toUpperCase()] }));
+
+    var dl = el("dl", { class: "kv" });
+    var add = function (k, v) { if (v === null || v === undefined || v === "") return; dl.appendChild(el("dt", { text: k })); dl.appendChild(el("dd", { text: String(v) })); };
+    var fscore = U.pickNum(flow, ["score"]), fverdict = U.pick(flow, ["verdict"]);
+    if (fscore !== null) add("Volume-flow score", fmtNum(fscore) + " / 100" + (fverdict ? " · " + String(fverdict).toLowerCase() : ""));
+    var osc = U.pickNum(banker, ["oscillator"]), oprev = U.pickNum(banker, ["previous"]), ostate = U.pick(banker, ["state"]);
+    if (osc !== null) add("Banker-fund oscillator", fmtNum(osc) + (oprev !== null ? " (was " + fmtNum(oprev) + ")" : "") + (ostate ? " · " + String(ostate).toLowerCase() : ""));
+    var bk = U.pickNum(mcdx, ["banker"]), hm = U.pickNum(mcdx, ["hot_money"]), rt = U.pickNum(mcdx, ["retail"]), sig = U.pick(mcdx, ["signal"]);
+    if (bk !== null) add("Who is active", "banker " + fmtNum(bk) + " · hot money " + fmtNum(hm) + " · retail " + fmtNum(rt) + (sig ? " · " + String(sig).toLowerCase() : ""));
+    var lastClose = U.pickNum(sm, ["last_close"]);
+    if (lastClose !== null) add("Priced as of", fmtNum(lastClose) + (sm.as_of ? " · " + String(sm.as_of).slice(0, 10) : ""));
+    c.appendChild(dl);
+    var note = U.pick(sm, ["methodology_note", "note"]);
+    c.appendChild(el("div", { class: "muted", style: { fontSize: "11.5px", marginTop: "8px" }, text: note ? String(note) : "Price/volume-derived proxy for institutional activity — not actual fund-flow data." }));
+    var details = el("details", { style: { marginTop: "10px" } });
+    details.appendChild(el("summary", { class: "muted", style: { cursor: "pointer", fontSize: "12px" }, text: "Full smart-money payload" }));
+    details.appendChild(U.renderObject(sm));
+    c.appendChild(details);
   }
 
   function renderFibTab() {

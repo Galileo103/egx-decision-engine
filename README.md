@@ -56,6 +56,12 @@ editable install of `tradingview-mcp` from
   squeeze, volume breakout, smart volume, momentum candles, smart money,
   custom screen) or the flagship **Candidates** mode that merges all scanners
   and ranks symbols by hit count and score.
+- **App-rules backtest** (`/backtest.html`, default tab) — test the app's own
+  entries (squeeze breakout, 20-day breakout, pullback, momentum) with the
+  Guardian's exits on Yahoo daily history; compare exit styles, sweep stop
+  distances, run a rule across a whole universe, and replay your open
+  positions under the Guardian's rules — each with a plain-language verdict
+  and a small-sample caveat.
 - **Backtest** (`/backtest.html`) — run any of the built-in strategies over
   Yahoo history with commission/slippage costs, compare all strategies, or
   walk-forward test; equity curve and trade log included.
@@ -63,6 +69,35 @@ editable install of `tradingview-mcp` from
   risk-based position sizing, mark-to-market performance (win rate, average
   R, open risk), and alert rules (price levels, score threshold, squeeze,
   signal change, entry hit) with optional Telegram delivery.
+- **Leaders** (screener tab) — relative-strength ranking of a universe vs
+  EGX30 over 1/3/6 months with 52-week-high, SMA50 and liquidity flags,
+  rebuilt after every close from Yahoo daily candles (works even when
+  TradingView is rate-limited).
+- **Patterns** (screener tab) — ~75 patterns in seven categories (reversal
+  shapes, triangles, continuation flags/pennants/rectangles, wedges, channels,
+  26 candlestick patterns, price-action events such as breakouts, traps,
+  springs, BOS/CHoCH) on daily candles; each carries category, direction,
+  kind, reliability/frequency tier, FORMING vs CONFIRMED, target, stop hint,
+  quality; drawn on the stock page; confirmed ones feed the Scorecard so
+  EGX-specific hit rates accumulate per pattern (see the Catalog view).
+- **Signal Scorecard** (screener tab) — every stored scanner hit is graded by
+  its 5/10/20-session return vs EGX30; per-scanner beat rates become weights
+  in the Candidates ranking once a scanner has 20 graded hits.
+- **Decision checklist + support/resistance** (stock page) — six pillars
+  (trend, S/R, volume, price action, patterns, risk plan) each PASS/WARN/FAIL
+  with one line of evidence and a SETUP / WATCH / NO SETUP verdict naming what
+  is missing; tested S/R zones (swing clusters weighted by touches, recency,
+  volume; 52w extremes; round numbers; SMA50/200) drawn on the chart and used
+  to sanity-check the trade plan's stop and targets.
+- **Your position on the stock page** — when you hold the stock, a card shows
+  qty, entry, stop, R, the Guardian verdict and reasons, and the chart draws
+  your entry / stop / suggested stop.
+- **Position Guardian** (on the portfolio page) — the "when to sell" side:
+  one exit verdict per open position (stop / target hit, ATR trailing-stop
+  tighten or trail exit, thesis broken when the snapshot score/signal turns
+  since entry, time stop for dead money), with every reason listed, run
+  every 10 minutes in session and after the close, pushed to Telegram once
+  per position per verdict per day.
 - **Scheduler** — background jobs in Cairo time: intraday alert evaluation
   every 10 minutes during the session, post-close universe snapshot +
   candidate scan, optional AI morning brief at 09:30, weekly symbol-list
