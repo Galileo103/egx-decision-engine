@@ -180,6 +180,8 @@ def _row_price_change(key: str, row: dict) -> tuple[Optional[float], Optional[fl
             return row.get("last_close"), None
         if key == "custom":
             return row.get("price"), row.get("change_pct")
+        if key in ("range_breakout", "squeeze_breakout", "momentum_3", "pullback_trend"):
+            return row.get("price"), row.get("change_pct")   # rule_scanner payload
     except Exception:
         pass
     return None, None
@@ -416,6 +418,13 @@ _SCANNER_FAMILY: dict[str, str] = {
     "volume_breakout": "thrust",
     "momentum": "thrust",
     "smart_money": "flow",
+    # The app's own candle rules (rule_scanner): a squeeze BREAKOUT is the coil
+    # resolving, so it shares the coil family; the two thrust rules read the
+    # same bar as volume_breakout/momentum; the pullback is its own idea.
+    "squeeze_breakout": "coil",
+    "range_breakout": "thrust",
+    "momentum_3": "thrust",
+    "pullback_trend": "pullback",
 }
 
 
@@ -509,6 +518,31 @@ def candidates(timeframe: str = "1D", persist: bool = False) -> dict:
                     entry["price"] = price
                 if entry["change_pct"] is None and change is not None:
                     entry["change_pct"] = change
+
+        # The proven-rules scanner (Yahoo candles, no TradingView) journals its
+        # hits for the session in the post-close job; merge the stored hits for
+        # the same session so Candidates reflects both evidence sources.
+        try:
+            from app import calendar_egx
+            from app.services import rule_scanner
+
+            session = calendar_egx.last_trading_day(calendar_egx.now_cairo().date()).strftime("%Y-%m-%d")
+            for hit in rule_scanner.stored_hits(session):
+                sym = _bare_symbol(hit.get("symbol"))
+                key = str(hit.get("scanner"))
+                if not sym or key not in rule_scanner.RULES:
+                    continue
+                entry = merged.setdefault(sym, {"symbol": sym, "scanners": [], "payloads": {},
+                                                "price": None, "change_pct": None})
+                if key not in entry["scanners"]:
+                    entry["scanners"].append(key)
+                # already journaled by rule_scanner — do not re-persist a copy
+                if entry["price"] is None and hit.get("price") is not None:
+                    entry["price"] = hit["price"]
+                if entry["change_pct"] is None and hit.get("change_pct") is not None:
+                    entry["change_pct"] = hit["change_pct"]
+        except Exception as exc:  # noqa: BLE001
+            scanner_errors.append({"scanner": "proven_rules", "error": str(exc)})
 
         # Preliminary rank to decide which symbols earn the expensive
         # per-symbol scoring pass (bounded to _SCORE_TOP_N). Distinct signal
@@ -647,13 +681,14 @@ def latest_candidates(limit: int = 20) -> dict:
         from app import db
 
         d = db.query("SELECT MAX(date) AS d FROM scanner_hits WHERE scanner NOT LIKE 'pattern_%' "
-                     "AND COALESCE(source, 'live') = 'live'")
+                     "AND scanner NOT LIKE 'checklist_%' AND COALESCE(source, 'live') = 'live'")
         date = d[0].get("d") if d else None
         if not date:
             return {"candidates": [], "as_of": None, "stored": True, "count": 0}
         rows = db.query(
             "SELECT scanner, symbol, payload_json FROM scanner_hits "
-            "WHERE date = ? AND scanner NOT LIKE 'pattern_%' AND COALESCE(source, 'live') = 'live'",
+            "WHERE date = ? AND scanner NOT LIKE 'pattern_%' AND scanner NOT LIKE 'checklist_%' "
+            "AND COALESCE(source, 'live') = 'live'",
             (date,)
         )
         merged: dict[str, dict] = {}

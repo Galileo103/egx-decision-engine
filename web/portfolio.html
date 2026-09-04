@@ -187,6 +187,24 @@
     return wrap;
   }
 
+  var SELL_VERDICT_CLASS = { hold: 'up', reduce: 'warn', exit: 'down' };
+
+  function exitPlanNode(row) {
+    var sc = row.sell_checklist;
+    var wrap = PG.mk('div', { style: 'font-size:12px;line-height:1.45;white-space:nowrap' });
+    if (sc && sc.verdict) {
+      wrap.appendChild(PG.mk('span', { class: 'badge ' + (SELL_VERDICT_CLASS[sc.verdict] || 'neutral'), title: sc.headline || '' }, [String(sc.verdict).toUpperCase()]));
+    }
+    var lines = [];
+    if (row.exit_below !== null && row.exit_below !== undefined) lines.push('exit < ' + PG.num(row.exit_below));
+    if (row.reduce_at !== null && row.reduce_at !== undefined) lines.push('reduce @ ' + PG.num(row.reduce_at));
+    if (row.trail_stop_to !== null && row.trail_stop_to !== undefined) lines.push('stop \u2192 ' + PG.num(row.trail_stop_to));
+    if (row.bearish_trigger && row.bearish_trigger.level !== undefined) lines.push('bear trigger ' + PG.num(row.bearish_trigger.level));
+    lines.forEach(function (t) { wrap.appendChild(PG.mk('div', { class: 'pg-muted' }, [t])); });
+    if (!wrap.childNodes.length) wrap.textContent = '\u2014';
+    return wrap;
+  }
+
   function markNode(row) {
     if (row.mark === null || row.mark === undefined) return PG.mk('span', { class: 'pg-muted' }, ['—']);
     var wrap = PG.mk('span', {}, [PG.num(row.mark)]);
@@ -233,6 +251,7 @@
           { key: 'r_now', label: 'R now', numeric: true, render: function (r) { return PG.signedNode(r.r_now, 'R'); } },
           { key: 'peak_r', label: 'Peak R', numeric: true, render: function (r) { return PG.signedNode(r.peak_r, 'R'); } },
           { key: 'suggested_stop', label: 'Suggested stop', numeric: true },
+          { key: 'exit_plan', label: 'Exit plan', numeric: false, render: exitPlanNode },
           { key: 'bars_held', label: 'Sessions', numeric: true },
           { key: 'reasons', label: 'Why', numeric: false, render: function (r) { return reasonsNode(r.reasons); } }
         ],

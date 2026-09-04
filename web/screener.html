@@ -222,7 +222,13 @@
       var refresh = PG.mk('button', { type: 'button', class: 'pg-btn secondary' }, ['Refresh']);
       refresh.addEventListener('click', function () { candidatesLoaded = false; loadCandidates(true); });
       head.appendChild(refresh);
+      var rulesBtn = PG.mk('button', { type: 'button', class: 'pg-btn secondary', title: "Run the app's own four candle rules on the last bar of every EGX stock (Yahoo, no TradingView). A few minutes on a cold cache; runs in the background." }, ['Scan proven rules']);
+      rulesBtn.addEventListener('click', function () { startRuleScan(rulesBtn); });
+      head.appendChild(rulesBtn);
       box.appendChild(head);
+      var rulesLine = PG.mk('div', { class: 'pg-muted', id: 'rulesLine', style: 'font-size:12px;margin-bottom:8px' });
+      box.appendChild(rulesLine);
+      renderRulesLine(rulesLine);
       if (payload && payload.degraded) PG.warnBox(box, payload.degraded);
       box.appendChild(PG.table(rows, {
         onRow: PG.openStock,
@@ -241,6 +247,49 @@
       PG.errBox(box, 'Candidates failed: ' + (e && e.message ? e.message : e));
       PG.notify('Candidates failed: ' + (e && e.message ? e.message : e), 'error');
     }
+  }
+
+  /* ---------- proven-rules scanner (Yahoo candles) ---------- */
+  var RULE_LABEL = { range_breakout: '20-day high breakout', squeeze_breakout: 'Squeeze breakout',
+                     momentum_3: 'Three rising closes', pullback_trend: 'Pullback in uptrend' };
+  var rulesPoll = null;
+
+  async function renderRulesLine(line) {
+    if (!line) line = $('rulesLine');
+    if (!line) return;
+    try {
+      var r = await PG.api('get', '/api/screener/rules');
+      if (!r || !r.hits) { line.textContent = 'Proven rules: no hits stored yet — press Scan proven rules (the post-close job does it daily).'; return; }
+      var parts = Object.keys(r.by_rule || {}).map(function (k) {
+        var e = (r.edge || {})[k];
+        return (RULE_LABEL[k] || k) + ' ' + r.by_rule[k] + (e && e.verdict ? ' (' + e.verdict.replace('_', ' ') + (e.n ? ', n=' + e.n : '') + ')' : '');
+      });
+      line.textContent = 'Proven rules for ' + r.date + ': ' + r.hits + ' hit' + (r.hits === 1 ? '' : 's') + ' — ' + parts.join(' · ') + '. Merged into the table above under the rule names.';
+    } catch (e) { line.textContent = ''; }
+  }
+
+  async function startRuleScan(btn) {
+    try {
+      var res = await PG.api('post', '/api/screener/rules/scan', { universe: 'ALL' });
+      if (res && res.error && !res.started) { PG.notify('Rule scan: ' + res.error, 'error'); return; }
+      btn.disabled = true;
+      var tick = async function () {
+        try {
+          var s = await PG.api('get', '/api/screener/rules/status');
+          var line = $('rulesLine');
+          if (s.running) {
+            if (line) line.textContent = 'Scanning proven rules… ' + (s.done || 0) + ' / ' + (s.total || '?') + ' stocks' + (s.detail ? ' (' + s.detail + ')' : '');
+            rulesPoll = setTimeout(tick, 4000);
+          } else {
+            btn.disabled = false; rulesPoll = null;
+            if (s.error) { PG.notify('Rule scan failed: ' + s.error, 'error'); }
+            else { PG.notify('Proven rules scanned: ' + ((s.result || {}).hits || 0) + ' hit(s)', 'success'); }
+            candidatesLoaded = false; loadCandidates(true);
+          }
+        } catch (e) { btn.disabled = false; }
+      };
+      tick();
+    } catch (e) { PG.notify('Rule scan failed: ' + (e && e.message ? e.message : e), 'error'); }
   }
 
   /* ---------- best setups ---------- */

@@ -282,11 +282,47 @@
       (r.reasons || []).forEach(function (t) {
         wrap.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-top:4px", text: String(t) }));
       });
+      wrap.appendChild(sellCheckNode(r.sell_checklist));
       if (r.note) wrap.appendChild(el("div", { style: "font-size:12px;margin-top:6px;font-style:italic", text: "Your note: " + r.note }));
       box.appendChild(wrap);
     });
     var link = el("a", { href: "/portfolio.html", class: "muted", style: "font-size:12px", text: "Manage on the portfolio page →" });
     box.appendChild(link);
+  }
+
+  /* Sell checklist block: verdict, the levels it cites, six pillar chips. */
+  var SELL_BADGE = { hold: "buy", reduce: "neutral", exit: "sell" };
+  var SELL_PILLAR = { thesis: "Thesis", weekly: "Weekly", relative_strength: "Rel. strength",
+                      distribution: "Distribution", bearish_events: "Bear events", exit_plan: "Exit plan" };
+  var SELL_STATUS_CLASS = { pass: "up", warn: "neutral", fail: "sell" };
+  var SELL_STATUS_ICON = { pass: "\u2713", warn: "\u26A0", fail: "\u2717" };
+
+  function sellCheckNode(sc) {
+    var box = el("div", { style: "margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:6px" });
+    if (!sc) {
+      box.appendChild(el("div", { class: "muted", style: "font-size:12px", text: "Sell checklist unavailable (not enough daily history)." }));
+      return box;
+    }
+    var head = el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px" });
+    head.appendChild(el("span", { class: "badge " + (SELL_BADGE[sc.verdict] || "neutral"), text: "Sell check: " + String(sc.verdict || "—").toUpperCase() }));
+    head.appendChild(el("span", { style: "font-size:12.5px", text: sc.headline || "" }));
+    box.appendChild(head);
+    var dl = sc.decision_levels || {};
+    var chips = el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px" });
+    if (dl.exit_below !== null && dl.exit_below !== undefined) chips.appendChild(el("span", { class: "badge sell", text: "Exit below " + fmtNum(dl.exit_below) + (dl.exit_reason ? " \u00b7 " + dl.exit_reason : "") }));
+    if (dl.bearish_trigger) chips.appendChild(el("span", { class: "badge neutral", title: "Nearest bearish neckline/trigger above your exit line", text: "Bear trigger " + fmtNum(dl.bearish_trigger.level) + " \u00b7 " + dl.bearish_trigger.label }));
+    if (dl.reduce_at !== null && dl.reduce_at !== undefined) chips.appendChild(el("span", { class: "badge buy", text: "Reduce at " + fmtNum(dl.reduce_at) + (dl.reduce_reason ? " \u00b7 " + dl.reduce_reason : "") }));
+    if (dl.trail_stop_to !== null && dl.trail_stop_to !== undefined) chips.appendChild(el("span", { class: "badge neutral", text: "Trail stop to " + fmtNum(dl.trail_stop_to) + (dl.trail_reason ? " \u00b7 " + dl.trail_reason : "") }));
+    box.appendChild(chips);
+    var pl = el("div", { style: "display:flex;gap:6px;flex-wrap:wrap" });
+    Object.keys(SELL_PILLAR).forEach(function (k) {
+      var st = (sc.pillars || {})[k];
+      if (!st) return;
+      pl.appendChild(el("span", { class: "badge " + (SELL_STATUS_CLASS[st] || "neutral"), title: SELL_PILLAR[k] + ": " + st, text: (SELL_STATUS_ICON[st] || "?") + " " + SELL_PILLAR[k] }));
+    });
+    box.appendChild(pl);
+    box.appendChild(el("a", { href: "/api/stocks/" + encodeURIComponent(SYMBOL) + "/sell-checklist", target: "_blank", class: "muted", style: "font-size:11px;display:inline-block;margin-top:6px", text: "full sell checklist (raw)" }));
+    return box;
   }
 
   /* ---------- decision checklist ---------- */

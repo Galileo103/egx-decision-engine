@@ -87,6 +87,18 @@ async def stock_levels(symbol: str) -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+@router.get("/{symbol}/sell-checklist")
+async def stock_sell_checklist(symbol: str) -> dict[str, Any]:
+    """Six-pillar SELL checklist for a held stock (or 'if you held it'): thesis, weekly,
+    relative strength, distribution, bearish events, exit plan — with the levels it cites."""
+    try:
+        from app.services import sell_checklist
+
+        return await asyncio.to_thread(sell_checklist.sell_checklist, symbol)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
 @router.get("/{symbol}/checklist")
 async def stock_checklist(symbol: str) -> dict[str, Any]:
     """Six-pillar decision checklist: trend, S/R, volume, price action, patterns, risk plan."""

@@ -242,6 +242,31 @@ def start(...) / status()       # background job; weekly_maintenance also calls 
 beat_rate/avg_excess read "in the signal's favour"; `baseline()` reads the stored random-entry yardstick (default 50%);
 weight = 1 + 2 × (right-way rate − baseline rate), clamped [0.5, 1.5]; horizons carry `se_excess`, `beat_vs_random_pp`, `excess_vs_random`.
 
+### app/services/rule_scanner.py — proven-rules scanner (2026-09-05)
+```python
+RULES = ('range_breakout','squeeze_breakout','momentum_3','pullback_trend')   # rules_backtest._SIGNALS on the LAST bar
+def rule_hits_last_bar(symbol, candles) -> list[dict]      # pure
+def scan(universe='ALL', persist=True, limit=None, rules=None) -> dict   # journals scanner_hits(source='live') under the rule name
+def stored_hits(date=None) / latest() / start(universe) / status()
+```
+screeners.candidates() merges stored_hits(last_trading_day) into the live merge; _SCANNER_FAMILY maps the rules
+(squeeze_breakout→coil, range_breakout/momentum_3→thrust, pullback_trend→pullback); post_close runs scan('ALL') before candidates.
+checklist.checklist(symbol, candles=None); replay.checklist_hits(symbol, candles, step=5) journals checklist_{verdict} (replay);
+setups._persist journals live checklist_{verdict}; latest_candidates excludes 'checklist_%'; edge kind 'checklist' + edge.checklist_summary().
+Routes: GET /api/screener/rules, POST /api/screener/rules/scan {universe}, GET /api/screener/rules/status; POST /api/edge/replay accepts `checklist`.
+
+### app/services/sell_checklist.py — holder's six pillars (Phase 3, 2026-09-05)
+```python
+PILLARS = ('thesis','weekly','relative_strength','distribution','bearish_events','exit_plan')  # pass = supports holding, fail = says exit
+def sell_checklist(symbol, position=None, candles=None, mark=None) -> dict
+#   {verdict: hold|reduce|exit, headline (cites prices), pillars[], decision_levels{exit_below, exit_reason,
+#    bearish_trigger{level,label,status}, reduce_at, reduce_reason, trail_stop_to, trail_reason, ladder[]}, fresh_bearish[]}
+def compact(sc) -> dict|None   # slice attached to each Guardian row as row['sell_checklist']
+```
+guardian.apply_sell_checklist(row, compact) adds BEARISH_EVENT (warning; fresh <= 3 sessions), a structure TIGHTEN_STOP
+(suggested_stop = trail_stop_to when above the current stop), the exit-ladder reason on target hits, and row keys
+exit_below / reduce_at / trail_stop_to / bearish_trigger (also in the Telegram text as a 'Levels:' line).
+
 ### app/services/backtests.py
 ```python
 STRATEGIES: list[str]  # read the literal strategy names from backtest_service source (9 of them)
@@ -385,6 +410,7 @@ include all routers, then `app.mount("/", StaticFiles(directory="web", html=True
 | GET /api/stocks/{symbol}/patterns | patterns.detect (one symbol, live). Rows carry `event_id`, `event_headline`, `also_seen_as`, `age_days`, `horizon`; `weekly_*` structure rows carry `timeframe: "1W"` and never cluster with daily rows; response adds `events` (one per clustered event, newest first), `distinct_events`, `events_by_direction`, `decisive_level` |
 | (module) app.services.weekly | `resample(candles)` daily → Sunday–Thursday weekly OHLCV; `context(candles)` weekly trend (structure, 10/40-week averages, one sentence); `zones(candles)` tested weekly swing zones; `structure_rows(candles)` weekly HH/HL, LH/LL, BOS, CHoCH as `weekly_*` pattern rows. No I/O — callers pass daily candles |
 | GET /api/stocks/{symbol}/levels | levels.compute (tested S/R zones, 52w, round numbers, SMAs). Adds `weekly_supports` / `weekly_resistances` (daily candles resampled to weeks, 2+ weekly touches) and flags `weekly` + `weekly_touches` on daily levels that sit on one; `key_levels` may include `timeframe: "1W"` zones |
+| GET /api/stocks/{symbol}/sell-checklist | sell_checklist.sell_checklist (holder's six pillars + decision levels exit_below / reduce_at / trail_stop_to / ladder; uses the open position when held) |
 | GET /api/stocks/{symbol}/checklist | checklist.checklist (six-pillar decision checklist). Trend pillar text ends with a `Weekly:` sentence and carries `weekly` {trend, structure, sma10, sma40, …}; weekly pattern rows are excluded from the Price-action pillar |
 | POST /api/screener/leaders/refresh | leaders.compute(persist=True) |
 | GET /api/portfolio/guardian | guardian.evaluate(persist=False, notify=False) |

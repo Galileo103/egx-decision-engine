@@ -204,10 +204,13 @@ def _scorecard_rows() -> list[dict]:
         h20 = (sc.get("horizons") or {}).get("20") or {}
         n = int(h10.get("n") or 0)
         beat, excess = h10.get("beat_rate"), h10.get("avg_excess")
-        kind = "pattern" if str(name).startswith("pattern_") else "scanner"
+        kind = ("pattern" if str(name).startswith("pattern_") else
+                "checklist" if str(name).startswith("checklist_") else "scanner")
         verdict = beat_verdict(n, h10.get("beat_vs_random_pp"), h10.get("excess_vs_random"),
                                h10.get("se_excess"))
-        label = _pattern_label(str(name)[len("pattern_"):]) if kind == "pattern" else str(name).replace("_", " ")
+        label = (_pattern_label(str(name)[len("pattern_"):]) if kind == "pattern" else
+                 "Checklist verdict: " + str(name)[len("checklist_"):].replace("_", " ").upper()
+                 if kind == "checklist" else str(name).replace("_", " "))
         rows.append({
             "kind": kind, "name": name, "label": label, "period": "graded history",
             "n": n, "hit_rate": beat, "edge_metric": excess,
@@ -270,6 +273,42 @@ def _summary(rows: list[dict]) -> dict:
     }
 
 
+def checklist_summary(rows: list[dict], base: Optional[dict] = None) -> Optional[dict]:
+    """Does a SETUP verdict actually beat a NO SETUP? Built from the checklist rows."""
+    by = {r["name"]: r for r in rows if r.get("kind") == "checklist"}
+    if not by:
+        return None
+    def _get(v: str) -> dict:
+        r = by.get(f"checklist_{v}") or {}
+        x = r.get("extra") or {}
+        return {"n": r.get("n") or 0, "right_rate": r.get("hit_rate"), "avg_excess": r.get("edge_metric"),
+                "excess_vs_random": x.get("excess_vs_random"), "rate_vs_random_pp": x.get("rate_vs_random_pp"),
+                "verdict": r.get("verdict")}
+    setup, watch, no = _get("setup"), _get("watch"), _get("no_setup")
+    spread = None
+    if setup["avg_excess"] is not None and no["avg_excess"] is not None:
+        spread = round(setup["avg_excess"] - no["avg_excess"], 2)
+    enough = setup["n"] >= MIN_SAMPLE and no["n"] >= MIN_SAMPLE
+    if not enough:
+        verdict, text = "too_few", (f"Too few graded verdicts yet ({setup['n']} SETUP, {no['n']} NO SETUP) — run the "
+                                  "replay with the checklist option.")
+    elif spread is not None and spread >= 1.0 and (setup["excess_vs_random"] or 0) > 0:
+        verdict, text = "edge", (f"The checklist works: over the next 10 sessions a SETUP beat EGX30 by "
+                               f"{setup['avg_excess']:+.2f}% on average ({setup['n']} verdicts) versus "
+                               f"{no['avg_excess']:+.2f}% for a NO SETUP ({no['n']}) — a {spread:+.2f}-point gap, and "
+                               f"{setup['excess_vs_random']:+.2f} above a random buy.")
+    elif spread is not None and spread > 0:
+        verdict, text = "marginal", (f"SETUP edges NO SETUP by only {spread:+.2f} points over 10 sessions "
+                                   f"({setup['n']} vs {no['n']} verdicts) — the checklist sorts, but weakly.")
+    else:
+        verdict, text = "negative", (f"SETUP did not beat NO SETUP over 10 sessions ({spread:+.2f} points, "
+                                   f"{setup['n']} vs {no['n']} verdicts) — the pillars need recalibrating."
+                                   if spread is not None else "Checklist verdicts could not be compared.")
+    return {"setup": setup, "watch": watch, "no_setup": no, "spread_10d": spread, "verdict": verdict,
+            "verdict_text": VERDICT_TEXT.get(verdict, verdict), "text": text,
+            "random_excess": (base or {}).get("avg_excess")}
+
+
 def _headline(rows: list[dict], base: Optional[dict] = None) -> str:
     s = _summary(rows)
     rows = [r for r in rows if r.get("kind") != "baseline"]
@@ -319,6 +358,7 @@ def compute(universe: str = "EGX100", period: str = "3y", exit_rule: str = "guar
         out = {
             "rows": rows, "summary": _summary(rows), "headline": _headline(rows, base),
             "baseline": base if "error" not in base else None,
+            "checklist": checklist_summary(rows, base if "error" not in base else None),
             "universe": universe, "period": period, "exit_rule": exit_rule,
             "elapsed_s": round(time.monotonic() - started, 1), "as_of": _now_iso(),
             "basis": _basis(),
@@ -367,12 +407,12 @@ def latest() -> dict:
         rows = [r for r in rows if r["kind"] != "baseline"]
         base = base_rows[0]["extra"] if base_rows else None
         order = {"edge": 0, "marginal": 1, "negative": 2, "too_few": 3}
-        rows.sort(key=lambda x: ({"rule": 0, "scanner": 1, "pattern": 2}.get(x["kind"], 9),
+        rows.sort(key=lambda x: ({"rule": 0, "checklist": 1, "scanner": 2, "pattern": 3}.get(x["kind"], 9),
                                  order.get(x["verdict"], 9),
                                  -((x.get("extra") or {}).get("excess_vs_random") or x.get("edge_metric") or 0)))
         return {"rows": rows, "summary": _summary(rows), "headline": _headline(rows, base),
-                "baseline": base, "as_of": as_of, "universe": universe, "stored": True,
-                "basis": _basis()}
+                "baseline": base, "checklist": checklist_summary(rows, base),
+                "as_of": as_of, "universe": universe, "stored": True, "basis": _basis()}
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc), "rows": [], "stored": True}
 

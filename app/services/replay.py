@@ -45,6 +45,10 @@ CAIRO = ZoneInfo("Africa/Cairo")
 
 #: Bars before the first evaluated signal — SMA50 + the 120-bar BBW rank need it.
 WARMUP = 150
+#: The checklist is ~50x costlier than a pattern window, so its verdicts are
+#: replayed every CHECKLIST_STEP sessions (still thousands of graded verdicts).
+CHECKLIST_STEP = 5
+CHECKLIST_WINDOW = 320
 #: Candles handed to the pattern detector per window (it looks back <= 60
 #: sessions for pivots; the extra is for ATR/averages and the trap-reclaim rule).
 PATTERN_WINDOW = 320
@@ -117,6 +121,29 @@ def pattern_hits(symbol: str, candles: list[dict]) -> list[dict]:
     return out
 
 
+def checklist_hits(symbol: str, candles: list[dict], step: int = CHECKLIST_STEP) -> list[dict]:
+    """The six-pillar BUY checklist's verdict on every ``step``-th past session,
+    journaled as ``checklist_setup`` / ``checklist_watch`` / ``checklist_no_setup``
+    so the Scorecard grades what a SETUP actually did next versus a NO SETUP."""
+    from app.services import checklist as CK
+
+    out: list[dict] = []
+    for i in range(WARMUP, len(candles), max(1, int(step))):
+        window = candles[max(0, i - CHECKLIST_WINDOW + 1): i + 1]
+        try:
+            ck = CK.checklist(symbol, candles=window)
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(ck, dict) or "error" in ck or not ck.get("verdict"):
+            continue
+        out.append({
+            "date": str(window[-1].get("time")), "scanner": f"checklist_{ck['verdict']}", "symbol": symbol,
+            "payload": {"replay": True, "verdict": ck["verdict"], "score": ck.get("score"),
+                        "missing": ck.get("missing"), "direction": "bullish"},
+        })
+    return out
+
+
 # ── journaling + grading ─────────────────────────────────────────────────────
 
 
@@ -154,7 +181,7 @@ def _grade_symbol(symbol: str, candles: list[dict], bench: dict) -> tuple[int, i
 
 
 def run(universe: str = "EGX100", period: str = "5y", patterns: bool = True,
-        limit: Optional[int] = None) -> dict:
+        limit: Optional[int] = None, checklist: bool = False) -> dict:
     """Synchronous replay. Returns counts; never raises."""
     try:
         from app.services import leaders, rules_backtest as RB, scorecard
@@ -172,7 +199,8 @@ def run(universe: str = "EGX100", period: str = "5y", patterns: bool = True,
         if not bench.get("dates"):
             bench = leaders.benchmark_series()
         totals: dict[str, Any] = {
-            "universe": uni, "period": period, "patterns": bool(patterns), "symbols": len(syms),
+            "universe": uni, "period": period, "patterns": bool(patterns), "checklist": bool(checklist),
+            "symbols": len(syms),
             "skipped_no_data": 0, "signals_found": 0, "new_hits": 0, "graded": 0,
             "fully_graded_20d": 0, "by_scanner": {}, "benchmark": bench.get("source"),
         }
@@ -187,6 +215,8 @@ def run(universe: str = "EGX100", period: str = "5y", patterns: bool = True,
             hits = rule_hits(sym, candles)
             if patterns:
                 hits += pattern_hits(sym, candles)
+            if checklist:
+                hits += checklist_hits(sym, candles)
             for h in hits:
                 totals["by_scanner"][h["scanner"]] = totals["by_scanner"].get(h["scanner"], 0) + 1
             totals["signals_found"] += len(hits)
@@ -214,8 +244,8 @@ def run(universe: str = "EGX100", period: str = "5y", patterns: bool = True,
 
 
 def start(universe: str = "EGX100", period: str = "5y", patterns: bool = True,
-          limit: Optional[int] = None) -> dict:
-    return job.start(run, universe, period, patterns, limit)
+          limit: Optional[int] = None, checklist: bool = False) -> dict:
+    return job.start(run, universe, period, patterns, limit, checklist)
 
 
 def status() -> dict:

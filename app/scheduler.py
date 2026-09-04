@@ -186,6 +186,16 @@ def _post_close_body() -> dict:
         out["index"] = market.snapshot_egx30_index()
     except Exception as exc:
         out["index"] = {"error": str(exc)}
+    # Proven-rules scanner (Yahoo candles, whole listing) — journals hits under the
+    # rule names so Candidates below can merge them with a measured weight.
+    try:
+        from app.services import rule_scanner
+
+        rules = rule_scanner.scan("ALL", persist=True)
+        out["rules"] = ({k: rules.get(k) for k in ("scanned", "hits", "by_rule", "filtered_illiquid", "elapsed_s")}
+                        if isinstance(rules, dict) and "error" not in rules else rules)
+    except Exception as exc:
+        out["rules"] = {"error": str(exc)}
     try:
         from app.services import screeners
 

@@ -58,6 +58,39 @@ async def screener_candidates(
         return {"error": str(exc)}
 
 
+@router.get("/rules")
+async def screener_rules_latest() -> dict[str, Any]:
+    """Latest stored proven-rules scan (the app's own candle rules on every EGX stock)."""
+    try:
+        from app.services import rule_scanner
+
+        return await asyncio.to_thread(rule_scanner.latest)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
+class RuleScanBody(BaseModel):
+    universe: str = "ALL"
+
+
+@router.post("/rules/scan")
+async def screener_rules_scan(body: RuleScanBody) -> dict[str, Any]:
+    """Run the proven-rules scanner in the background (minutes on a cold cache). Poll /rules/status."""
+    try:
+        from app.services import rule_scanner
+
+        return rule_scanner.start(body.universe)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
+@router.get("/rules/status")
+async def screener_rules_status() -> dict[str, Any]:
+    from app.services import rule_scanner
+
+    return rule_scanner.status()
+
+
 @router.get("/candidates/latest")
 async def screener_candidates_latest(limit: int = Query(20)) -> dict[str, Any]:
     """Candidates from the last persisted scan — instant, no upstream calls."""

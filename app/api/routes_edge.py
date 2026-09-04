@@ -23,6 +23,7 @@ class ReplayBody(BaseModel):
     period: str = "5y"
     patterns: bool = True
     limit: Optional[int] = None
+    checklist: bool = False   # also replay the six-pillar BUY checklist verdicts (slower)
 
 
 @router.get("")
@@ -52,7 +53,7 @@ async def edge_status() -> dict[str, Any]:
 async def replay_start(body: ReplayBody) -> dict[str, Any]:
     """Replay the app's rules and patterns over history in the background."""
     try:
-        return replay.start(body.universe, body.period, body.patterns, body.limit)
+        return replay.start(body.universe, body.period, body.patterns, body.limit, body.checklist)
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
 

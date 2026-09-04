@@ -82,6 +82,7 @@
           <span>Proven edge</span>
           <span style="display:flex;gap:8px;align-items:center">
             <span class="as-of muted" id="edge-asof"></span>
+            <label class="muted" style="font-size:11px;display:flex;align-items:center;gap:4px" title="Also replay the six-pillar BUY checklist every 5 sessions, so the table can say whether a SETUP actually beats a NO SETUP (adds roughly 15 minutes)"><input type="checkbox" id="edge-replay-checklist"> include checklist</label>
             <button class="btn small" id="btn-edge-replay" title="Re-run the app's rules and pattern detector over 5 years of EGX100 history and grade every signal against EGX30 (about 25 minutes, runs in the background)">Replay history</button>
             <button class="btn small" id="btn-edge-refresh" title="Recompute the table from the graded history and universe backtests (a few minutes, background)">Refresh</button>
           </span>
@@ -127,7 +128,8 @@
     edgeProgress();
     document.getElementById("btn-cands-live").addEventListener("click", function () { loadCandidates(true); });
     document.getElementById("btn-edge-replay").addEventListener("click", function () {
-      startEdgeJob("/api/edge/replay", { universe: "EGX100", period: "5y", patterns: true }, "Replay");
+      startEdgeJob("/api/edge/replay", { universe: "EGX100", period: "5y", patterns: true,
+                                          checklist: !!document.getElementById("edge-replay-checklist").checked }, "Replay");
     });
     document.getElementById("btn-edge-refresh").addEventListener("click", function () {
       startEdgeJob("/api/edge/refresh", { universe: "EGX100", period: "3y" }, "Refresh");
@@ -564,7 +566,7 @@
   /* ---------- proven edge ---------- */
 
   var EDGE_VERDICT_CLASS = { edge: "buy", marginal: "neutral", negative: "sell", too_few: "" };
-  var EDGE_KIND_LABEL = { rule: "Rule", scanner: "Scanner", pattern: "Pattern" };
+  var EDGE_KIND_LABEL = { rule: "Rule", scanner: "Scanner", pattern: "Pattern", checklist: "Checklist" };
   var edgePollTimer = null;
 
   function loadEdge() {
@@ -572,6 +574,15 @@
     U.load(box, function () { return API.get("/api/edge"); }, function (c, data) {
       setText("edge-asof", data.as_of ? "computed " + String(data.as_of).slice(0, 16).replace("T", " ") : "never computed");
       if (data.headline) c.appendChild(el("div", { class: "empty-note", style: { fontSize: "13px" }, text: data.headline }));
+      if (data.checklist) {
+        var ck = data.checklist;
+        c.appendChild(el("div", { class: "empty-note", style: { fontSize: "12.5px" } }, [
+          el("span", { class: "badge " + (EDGE_VERDICT_CLASS[ck.verdict] || ""), text: "Buy checklist: " + (ck.verdict_text || ck.verdict) }),
+          el("span", { text: " " + (ck.text || "") }),
+        ]));
+      } else if (data.rows && data.rows.length) {
+        c.appendChild(el("div", { class: "empty-note", text: "Buy checklist not yet measured — tick 'include checklist' and press Replay history." }));
+      }
       var rows = Array.isArray(data.rows) ? data.rows : [];
       if (!rows.length) return;
       var judged = rows.filter(function (r) { return r.verdict !== "too_few"; });

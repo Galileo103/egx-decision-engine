@@ -19,6 +19,12 @@ that applies; all reasons are listed):
                              "hit", and the record must be fixed
     STOP_TOUCHED   warning   today's low pierced the stop but the close
                              recovered — check whether your broker filled you
+    BEARISH_EVENT  warning   the pattern scanner confirmed a bearish event on
+                             this stock within the last 3 sessions (sell
+                             checklist) — cites the level and its target
+    CHECKLIST_EXIT warning   the six-pillar sell checklist says EXIT (thesis and
+                             weekly both broken, or three pillars against) while
+                             the stop is still intact
     THESIS_BROKEN  warning   snapshot signal turned SELL, or the composite
                              score fell >= SCORE_DROP points since entry
     TIGHTEN_STOP   advice    >= 1R reached and the chandelier/breakeven level
@@ -54,6 +60,8 @@ SEVERITY: dict[str, str] = {
     "TARGET1_HIT": "action",
     "PLAN_INVALID": "warning",
     "STOP_TOUCHED": "warning",
+    "BEARISH_EVENT": "warning",
+    "CHECKLIST_EXIT": "warning",
     "THESIS_BROKEN": "warning",
     "TIGHTEN_STOP": "advice",
     "TIME_STOP": "advice",
@@ -404,6 +412,86 @@ def assess_position(
     }
 
 
+def apply_sell_checklist(row: dict, sc: Optional[dict]) -> dict:
+    """Fold the sell checklist (``sell_checklist.compact``) into a Guardian row.
+
+    Adds: a BEARISH_EVENT verdict when a confirmed bearish signal is fresh; a
+    structure-anchored TIGHTEN_STOP (stop just under a tested support) when it
+    beats the current stop; the partial-exit ladder on target hits; and the
+    decision levels (exit_below / reduce_at / trail_stop_to) every verdict
+    cites. Pure — no I/O — so it is unit-testable.
+    """
+    row["sell_checklist"] = sc
+    if not sc:
+        row.setdefault("exit_below", row.get("stop"))
+        return row
+    verdicts = list(row.get("all_verdicts") or [])
+    reasons = list(row.get("reasons") or [])
+    price, stop = row.get("mark"), row.get("stop")
+    dl = sc.get("decision_levels") or {}
+    hard_exit = "EXIT_STOP" in verdicts or "TRAIL_EXIT" in verdicts
+    # 1. Fresh confirmed bearish signal on a stock you hold.
+    fresh = sc.get("fresh_bearish") or []
+    if fresh and price is not None and not hard_exit:
+        f = fresh[0]
+        lvl, tgt = f.get("neckline"), f.get("target")
+        ago = f.get("sessions_ago")
+        verdicts.append("BEARISH_EVENT")
+        text = (f"Confirmed bearish signal {ago} session(s) ago: {f['label']}" if ago is not None
+                else f"Confirmed bearish signal: {f['label']}")
+        if lvl is not None:
+            text += f" at {lvl:.2f}"
+        if tgt is not None:
+            text += f", measured target {tgt:.2f}"
+        if tgt is not None and stop is not None and tgt < stop:
+            text += ". That target sits below your stop — the chart expects the stop to be hit; leaving before it is beats waiting for it."
+        else:
+            text += ". Tighten the stop under the nearest tested support rather than hoping."
+        reasons.append(text)
+    # 1b. The checklist itself says exit while the stop is intact: say so as a
+    #     verdict, or the badge would read HOLD next to an EXIT checklist.
+    if sc.get("verdict") == "exit" and not hard_exit and "CHECKLIST_EXIT" not in verdicts:
+        verdicts.append("CHECKLIST_EXIT")
+        reasons.append("Sell checklist says EXIT: " + str(sc.get("headline") or "").replace("Exit: ", "", 1))
+    # 2. Structure stop: a tested support between the stop and the price.
+    trail = dl.get("trail_stop_to")
+    if (trail is not None and stop is not None and price is not None and trail > stop
+            and trail < price and not hard_exit):
+        cur = row.get("suggested_stop")
+        if cur is None or trail > cur:
+            row["suggested_stop"] = round(float(trail), 2)
+        if "TIGHTEN_STOP" not in verdicts:
+            verdicts.append("TIGHTEN_STOP")
+        reasons.append(f"Structure stop: raise the stop from {stop:.2f} to {trail:.2f}, "
+                       f"{dl.get('trail_reason') or 'under tested support'} — a level the market has "
+                       "respected beats an arbitrary distance.")
+    # 3. Partial-exit ladder when a target is reached.
+    ladder = dl.get("ladder") or []
+    if ladder and ("TARGET1_HIT" in verdicts or "TARGET2_HIT" in verdicts):
+        steps = []
+        for s in ladder:
+            if s.get("step") == "reduce_now":
+                steps.append(f"sell {s['pct']}% ({s['qty']} shares) at market ~{s['at']:.2f}")
+            elif s.get("step") == "stop_to":
+                steps.append(f"move the stop to {s['level']:.2f} ({s['why']})")
+            elif s.get("step") == "final":
+                steps.append(f"let the rest run to {s['at']:.2f} ({s['why']})")
+        if steps:
+            reasons.append("Exit ladder: " + "; ".join(steps) + ".")
+    verdict = min(verdicts, key=lambda v: _RANK[v]) if verdicts else "HOLD"
+    if verdict != "HOLD":
+        reasons = [r for r in reasons if not str(r).startswith("Stop intact, no target reached")]
+    row["all_verdicts"] = verdicts
+    row["verdict"] = verdict
+    row["severity"] = SEVERITY[verdict]
+    row["reasons"] = reasons
+    row["exit_below"] = dl.get("exit_below") if dl.get("exit_below") is not None else stop
+    row["reduce_at"] = dl.get("reduce_at")
+    row["trail_stop_to"] = trail
+    row["bearish_trigger"] = dl.get("bearish_trigger")
+    return row
+
+
 # ── persistence / delivery ───────────────────────────────────────────────────
 
 
@@ -439,6 +527,15 @@ def _telegram_text(row: dict) -> str:
         )
     if row.get("suggested_stop") is not None:
         parts.append(f"suggested stop {row['suggested_stop']:.2f}")
+    levels_bits = []
+    if row.get("exit_below") is not None:
+        levels_bits.append(f"exit below {row['exit_below']:.2f}")
+    if row.get("reduce_at") is not None:
+        levels_bits.append(f"reduce at {row['reduce_at']:.2f}")
+    if row.get("trail_stop_to") is not None:
+        levels_bits.append(f"trail stop to {row['trail_stop_to']:.2f}")
+    if levels_bits:
+        parts.append("Levels: " + " · ".join(levels_bits))
     if row.get("reasons"):
         parts.append(str(row["reasons"][0]))
     if row.get("note"):
@@ -492,6 +589,15 @@ def evaluate(persist: bool = False, notify: bool = False) -> dict:
                 pos, marks.get(symbol), candles, since,
                 snapshot_cache[symbol], entry_score, source, hist_err,
             )
+            # Sell checklist: bearish events, structure stop, exit ladder, levels.
+            try:
+                from app.services import sell_checklist as SC
+
+                sc = SC.sell_checklist(symbol, position=pos, mark=row.get("mark"))
+                row = apply_sell_checklist(row, SC.compact(sc))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("guardian: sell checklist failed for %s: %s", symbol, exc)
+                row = apply_sell_checklist(row, None)
             sent = False
             if notify and row["severity"] in NOTIFY_SEVERITIES:
                 if not _already_notified(row["position_id"], row["verdict"], today):
@@ -533,7 +639,9 @@ def evaluate(persist: bool = False, notify: bool = False) -> dict:
             "basis": (
                 "Advisory only. Marks may be daily closes (see mark_source); trailing "
                 "levels use 14-day ATR on Yahoo daily candles; thesis checks compare "
-                "the latest post-close snapshot with the score at entry."
+                "the latest post-close snapshot with the score at entry. Each row also "
+                "carries the six-pillar sell checklist: exit_below / reduce_at / "
+                "trail_stop_to are the levels the verdict cites."
             ),
             "date": today,
             "as_of": _now_iso(),

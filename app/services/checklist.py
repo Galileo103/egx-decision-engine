@@ -39,14 +39,19 @@ def _member_keys(head: dict, rows: list[dict]) -> list[str]:
     return [r["pattern"] for r in rows if r.get("event_id") == eid and r is not head]
 
 
-def checklist(symbol: str) -> dict:
-    """Run the six pillars for one symbol. Never raises."""
+def checklist(symbol: str, candles: Optional[list[dict]] = None) -> dict:
+    """Run the six pillars for one symbol. Never raises.
+
+    ``candles`` lets the historical replay hand in a past window; live callers
+    leave it None and the latest Yahoo daily candles are used.
+    """
     try:
         from app.services import leaders, levels, patterns, weekly
         from app.services.rules_backtest import Ind
 
         sym = str(symbol or "").upper().strip().split(":")[-1]
-        candles = leaders.daily_candles(sym)
+        if candles is None:
+            candles = leaders.daily_candles(sym)
         if len(candles) < 120:
             return {"symbol": sym, "error": f"not enough daily history ({len(candles)} bars)"}
         x = Ind(candles)

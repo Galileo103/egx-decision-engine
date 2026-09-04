@@ -115,6 +115,17 @@ def _persist(date: str, rows: list[dict]) -> None:
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         [(date, r["symbol"], r["score"], r["verdict"], r["headline"], json.dumps(r), _now_iso()) for r in rows],
     )
+    # Journal each verdict for the Scorecard (checklist_setup / _watch / _no_setup)
+    # so the live record of "what did a SETUP do next" grows alongside the replay.
+    # Excluded from Candidates by name; graded like any bullish signal.
+    session = str((rows[0].get("as_of") if rows else None) or date)[:10]
+    db.executemany(
+        "INSERT OR IGNORE INTO scanner_hits (date, scanner, symbol, payload_json, created_at, source) "
+        "VALUES (?, ?, ?, ?, ?, 'live')",
+        [(session, f"checklist_{r['verdict']}", r["symbol"],
+          json.dumps({"verdict": r["verdict"], "score": r["score"], "missing": r.get("missing"),
+                      "direction": "bullish"}), _now_iso()) for r in rows if r.get("verdict")],
+    )
 
 
 def latest(limit: int = 80, min_score: int = 0) -> dict:
