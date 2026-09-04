@@ -372,11 +372,13 @@
             sell.addEventListener('click', function () { fillPosition(row, 'sell'); });
             var s = PG.mk('button', { type: 'button', class: 'pg-btn secondary small', title: 'Move the protective stop (act on a TIGHTEN_STOP verdict)' }, ['Stop']);
             s.addEventListener('click', function () { editStop(row); });
+            var t = PG.mk('button', { type: 'button', class: 'pg-btn secondary small', title: 'Edit target 1 / target 2 (both must be above your entry)' }, ['Targets']);
+            t.addEventListener('click', function () { editTargets(row); });
             var b = PG.mk('button', { type: 'button', class: 'pg-btn danger small' }, ['Close']);
             b.addEventListener('click', function () { closePosition(row); });
             var x = PG.mk('button', { type: 'button', class: 'pg-btn secondary small', title: 'Remove: erase a record entered by mistake (duplicate / typo). Not a sale.' }, ['×']);
             x.addEventListener('click', function () { removePosition(row); });
-            wrap.appendChild(buy); wrap.appendChild(sell); wrap.appendChild(s); wrap.appendChild(b); wrap.appendChild(x);
+            wrap.appendChild(buy); wrap.appendChild(sell); wrap.appendChild(s); wrap.appendChild(t); wrap.appendChild(b); wrap.appendChild(x);
             return wrap;
           }
         }]
@@ -476,6 +478,25 @@
     }
   }
 
+  async function editTargets(row) {
+    var cur = function (v) { return (v === undefined || v === null) ? '' : String(v); };
+    var s = window.prompt('Targets for ' + (row.symbol || 'position') + ' (#' + row.id + ') — entry ' + row.entry + '\n'
+      + 'Type target1, target2 separated by a comma (or one value for target1 only).\n'
+      + 'Both must be ABOVE your entry.', cur(row.target1) + (row.target2 !== undefined && row.target2 !== null ? ', ' + cur(row.target2) : ''));
+    if (s === null) return;
+    var parts = String(s).split(/[,\s]+/).filter(function (p) { return p !== ''; }).map(Number);
+    if (!parts.length || parts.some(function (n) { return !isFinite(n) || n <= 0; })) { PG.notify('Enter one or two positive prices', 'error'); return; }
+    var body = { target1: parts[0] };
+    if (parts.length > 1) body.target2 = parts[1];
+    try {
+      await PG.api('post', '/api/portfolio/positions/' + encodeURIComponent(row.id) + '/update', body);
+      PG.notify('Targets for ' + row.symbol + ' updated', 'success');
+      refreshPortfolio();
+    } catch (e) {
+      PG.notify('Targets update failed: ' + (e && e.message ? e.message : e), 'error');
+    }
+  }
+
   async function editStop(row) {
     var s = window.prompt('New protective stop for ' + (row.symbol || 'position') + ' (#' + row.id + ')\n'
       + 'Current stop: ' + row.stop + ' · entry: ' + row.entry
@@ -484,9 +505,21 @@
     if (s === null) return;
     var x = Number(s);
     if (!isFinite(x) || x <= 0) { PG.notify('Invalid stop', 'error'); return; }
+    var body = { stop: x };
+    if (row.initial_stop === undefined || row.initial_stop === null) {
+      // Winner recorded with its stop already above cost: R is n/a until we
+      // know the risk actually taken at entry. Ask once, allow skipping.
+      var o = window.prompt('R multiples for ' + row.symbol + ' are n/a because the stop was recorded above cost.\n'
+        + 'What protective stop did you have AT ENTRY (below ' + row.entry + ')?\n\nLeave empty to skip.', '');
+      if (o !== null && String(o).trim() !== '') {
+        var ov = Number(o);
+        if (!isFinite(ov) || ov <= 0 || ov >= Number(row.entry)) { PG.notify('Original stop must be a price below your entry', 'error'); return; }
+        body.initial_stop = ov;
+      }
+    }
     try {
-      var res = await PG.api('post', '/api/portfolio/positions/' + encodeURIComponent(row.id) + '/update', { stop: x });
-      PG.notify('Stop for ' + row.symbol + ' set to ' + PG.num(x), 'success');
+      var res = await PG.api('post', '/api/portfolio/positions/' + encodeURIComponent(row.id) + '/update', body);
+      PG.notify('Stop for ' + row.symbol + ' set to ' + PG.num(x) + (body.initial_stop ? ' · original stop ' + PG.num(body.initial_stop) + ' recorded' : ''), 'success');
       var warns = res && typeof res === 'object' ? res.risk_warnings : null;
       if (Array.isArray(warns)) warns.forEach(function (w) { PG.notify('⚠ ' + w, 'error'); });
       refreshPortfolio();

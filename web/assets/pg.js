@@ -300,6 +300,13 @@ window.PG = (function () {
   }
 
   function loading(target, label) { target.textContent = ''; target.appendChild(mk('div', { class: 'pg-loading' }, [label || 'Loading…'])); }
+  /* Data-quality warning (amber): the page still works, but a column is blank
+     for a reason the reader must know before acting. */
+  function warnBox(target, msg) {
+    var box = mk('div', { class: 'pg-warn', role: 'status' }, ['\u26A0 ' + String(msg || '')]);
+    target.appendChild(box);
+    return box;
+  }
   function errBox(target, msg) {
     var s = String(msg || 'Request failed');
     var friendly = s;
@@ -370,6 +377,6 @@ window.PG = (function () {
 
   return { mk: mk, num: num, pctNode: pctNode, signedNode: signedNode, notify: notify, api: api, cellNode: cellNode,
            table: table, extractRows: extractRows, findVal: findVal, renderAny: renderAny, slim: slim, loading: loading,
-           errBox: errBox, metricCard: metricCard, detailsBlock: detailsBlock, openStock: openStock,
+           errBox: errBox, warnBox: warnBox, metricCard: metricCard, detailsBlock: detailsBlock, openStock: openStock,
            collectSymbols: collectSymbols, boot: boot };
 })();

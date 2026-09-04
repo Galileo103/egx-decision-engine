@@ -45,6 +45,7 @@ class UpdatePositionBody(BaseModel):
     target1: Optional[float] = None
     target2: Optional[float] = None
     note: Optional[str] = None
+    initial_stop: Optional[float] = None   # once, only while the record has none
 
 
 class FillBody(BaseModel):
@@ -152,7 +153,8 @@ async def portfolio_update(position_id: int, body: UpdatePositionBody) -> dict[s
     """Adjust the current stop / targets / note of an open position (e.g. act on TIGHTEN_STOP)."""
     try:
         return await asyncio.to_thread(
-            portfolio.update_position, position_id, body.stop, body.target1, body.target2, body.note
+            portfolio.update_position, position_id, body.stop, body.target1, body.target2, body.note,
+            body.initial_stop,
         )
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}

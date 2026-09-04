@@ -108,6 +108,14 @@ _SCHEMA: tuple[str, ...] = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS proven_edge(
+        kind TEXT, name TEXT, label TEXT, period TEXT,
+        n INTEGER, hit_rate REAL, edge_metric REAL, metric_label TEXT,
+        verdict TEXT, verdict_text TEXT, extra_json TEXT, universe TEXT, computed_at TEXT,
+        PRIMARY KEY (kind, name)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS rs_leaders(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT, universe TEXT, symbol TEXT, rank INTEGER, rs_score REAL,
@@ -196,6 +204,10 @@ _MIGRATIONS: tuple[str, ...] = (
     # frozen initial stop, tightening the stop would silently inflate R.
     "ALTER TABLE positions ADD COLUMN initial_stop REAL",
     "ALTER TABLE pattern_hits ADD COLUMN category TEXT",
+    # 'live' = journaled by a real scan; 'replay' = produced by the historical
+    # replay (track record only — never shown as today's candidates).
+    "ALTER TABLE scanner_hits ADD COLUMN source TEXT DEFAULT 'live'",
+    "ALTER TABLE signal_outcomes ADD COLUMN source TEXT DEFAULT 'live'",
 )
 
 # Indexes on the hot query paths. Without these the 10-minute alert cycle
@@ -221,6 +233,7 @@ _INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_position_fills_position ON position_fills(position_id, id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_outcomes_hit ON signal_outcomes(hit_id)",
     "CREATE INDEX IF NOT EXISTS idx_signal_outcomes_scanner ON signal_outcomes(scanner, date)",
+    "CREATE INDEX IF NOT EXISTS idx_scanner_hits_source_symbol ON scanner_hits(source, symbol)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_rs_leaders_unique ON rs_leaders(date, universe, symbol)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_pattern_hits_unique "
     "ON pattern_hits(date, universe, symbol, pattern)",
@@ -341,8 +354,11 @@ def prune(table: str, date_column: str, keep_days: int) -> int:
     cutoff = (
         datetime.now(_CAIRO) - timedelta(days=int(keep_days))
     ).isoformat()
+    # Replayed history is the Scorecard's track record — it must outlive the
+    # retention window that keeps live scan rows from growing forever.
+    keep = " AND COALESCE(source, 'live') != 'replay'" if table == "scanner_hits" else ""
     return execute_rowcount(
-        f"DELETE FROM {table} WHERE {date_column} < ?", (cutoff,)  # noqa: S608
+        f"DELETE FROM {table} WHERE {date_column} < ?{keep}", (cutoff,)  # noqa: S608
     )
 
 

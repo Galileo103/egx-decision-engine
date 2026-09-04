@@ -512,3 +512,91 @@ class TestDuplicateProtection:
         portfolio.adjust_position(pos["id"], -10, 110.0)
         r = portfolio.delete_position(pos["id"])
         assert "error" in r and "partial sales" in r["error"]
+
+
+# ── Phase 0 (2026-09-04): invalid targets, missing snapshot, original stop ───
+
+class TestPlanIntegrity:
+    def test_target_below_entry_is_never_a_hit(self) -> None:
+        # The live MENA case: entry 7.20, stop 6.60, target 1 typed as 6.88.
+        # Mark 6.99 is a -2.9% loss — the old code said TARGET1_HIT.
+        pos = _pos(entry=7.20, stop=6.60, target1=6.88, target2=7.53)
+        r = _assess(pos, 6.99, [7.2] * 20 + [7.1, 7.05, 6.99], spread=0.2)
+        assert r["verdict"] == "PLAN_INVALID"
+        assert "TARGET1_HIT" not in r["all_verdicts"]
+        assert r["severity"] == "warning"
+        assert r["target1"] is None and r["target2"] == 7.53
+        assert any("6.88" in f and "at/below your entry" in f for f in r["plan_faults"])
+        assert any("Fix this record" in s for s in r["reasons"])
+
+    def test_valid_target_still_fires_alongside_invalid_one(self) -> None:
+        pos = _pos(entry=100.0, stop=95.0, target1=90.0, target2=110.0)
+        r = _assess(pos, 111.0, [100.0] * 20 + [104.0, 108.0, 111.0])
+        # Target 2 is real and reached; the bogus target 1 is flagged, not "hit".
+        # (TIGHTEN_STOP also applies here — the trade is past +1R — and is fine.)
+        assert r["verdict"] == "TARGET2_HIT"
+        assert "PLAN_INVALID" in r["all_verdicts"] and "TARGET1_HIT" not in r["all_verdicts"]
+
+    def test_target2_not_above_target1_is_flagged(self) -> None:
+        pos = _pos(entry=100.0, stop=95.0, target1=110.0, target2=105.0)
+        r = _assess(pos, 101.0, [100.0] * 20 + [101.0])
+        assert r["verdict"] == "PLAN_INVALID" and r["target2"] is None and r["target1"] == 110.0
+
+    def test_stop_still_wins_over_plan_invalid(self) -> None:
+        pos = _pos(entry=100.0, stop=95.0, target1=90.0)
+        r = _assess(pos, 94.0, [100.0] * 20 + [97.0, 94.0])
+        assert r["verdict"] == "EXIT_STOP" and "PLAN_INVALID" in r["all_verdicts"]
+
+    def test_missing_snapshot_is_said_out_loud(self) -> None:
+        r = _assess(_pos(), 101.0, [100.0] * 20 + [101.0], snap=None)
+        assert r["thesis_check"] == "unavailable"
+        assert any("No daily snapshot" in s for s in r["reasons"])
+        r2 = _assess(_pos(), 101.0, [100.0] * 20 + [101.0],
+                     snap={"date": "2026-09-01", "score": 60, "signal": "BUY"}, entry_score=60)
+        assert r2["thesis_check"] == "ok"
+        assert not any("No daily snapshot" in s for s in r2["reasons"])
+
+    def test_unknown_entry_score_is_explained(self) -> None:
+        snap = {"date": "2026-09-01", "score": 40, "signal": "NEUTRAL"}
+        r = _assess(_pos(), 101.0, [100.0] * 20 + [101.0], snap=snap, entry_score=None)
+        assert r["verdict"] == "HOLD"
+        assert any("Score at entry is unknown" in s for s in r["reasons"])
+        r2 = _assess(_pos(), 101.0, [100.0] * 20 + [101.0], snap=snap, entry_score=70)
+        assert r2["verdict"] == "THESIS_BROKEN"
+        assert not any("Score at entry is unknown" in s for s in r2["reasons"])
+
+    def test_unknown_initial_risk_is_explained(self) -> None:
+        pos = _pos(entry=11.65, stop=12.50, initial_stop=None, target1=13.05, target2=13.55)
+        r = _assess(pos, 12.80, [11.6] * 20 + [12.0, 12.5, 12.8], spread=0.3)
+        assert r["r_now"] is None
+        assert any("Initial risk is unknown" in s for s in r["reasons"])
+
+    def test_open_rejects_manual_target_at_or_below_entry(self) -> None:
+        from app.services import portfolio
+
+        bad = portfolio.open_position("MENA", 100, 7.20, 6.60, target1=6.88, target2=7.53, note="x")
+        assert "error" in bad and "target1 6.88" in bad["error"]
+        bad2 = portfolio.open_position("MENA", 100, 7.20, 6.60, target1=7.60, target2=7.50, note="x")
+        assert "error" in bad2 and "target2" in bad2["error"]
+        ok = portfolio.open_position("MENA", 100, 7.20, 6.60, target1=7.53, target2=8.25, note="x")
+        assert "error" not in ok and ok["target1"] == 7.53
+
+    def test_update_rejects_bad_targets_and_records_original_stop_once(self) -> None:
+        from app.services import portfolio
+
+        pos = portfolio.open_position("ISPH", 10, 11.65, 12.50, note="winner", raised_stop=True)
+        assert pos["initial_stop"] is None
+        assert "error" in portfolio.update_position(pos["id"], target1=11.0)
+        assert "error" in portfolio.update_position(pos["id"], target1=13.0, target2=12.5)
+        ok_t = portfolio.update_position(pos["id"], target1=13.05, target2=13.55)
+        assert "error" not in ok_t and ok_t["target1"] == 13.05 and ok_t["target2"] == 13.55
+        # target2 alone must still respect the stored target1
+        assert "error" in portfolio.update_position(pos["id"], target2=13.0)
+        # original stop: must be below entry, and can be set only once
+        assert "error" in portfolio.update_position(pos["id"], initial_stop=11.70)
+        ok = portfolio.update_position(pos["id"], initial_stop=11.10)
+        assert "error" not in ok and ok["initial_stop"] == 11.10 and ok["stop"] == 12.50
+        again = portfolio.update_position(pos["id"], initial_stop=11.00)
+        assert "error" in again and "already recorded" in again["error"]
+        # and R is now anchored to it
+        assert portfolio._risk_per_share(ok) == pytest.approx(0.55)

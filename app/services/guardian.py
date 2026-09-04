@@ -14,6 +14,9 @@ that applies; all reasons are listed):
                              post-entry high after having reached >= 1R
     TARGET2_HIT    action    mark at/above target 2 — take profit / trail tight
     TARGET1_HIT    action    mark at/above target 1 — partial + stop to breakeven
+    PLAN_INVALID   warning   a recorded target sits at/below entry (or T2 <= T1) —
+                             a data-entry error; such targets are ignored, never
+                             "hit", and the record must be fixed
     STOP_TOUCHED   warning   today's low pierced the stop but the close
                              recovered — check whether your broker filled you
     THESIS_BROKEN  warning   snapshot signal turned SELL, or the composite
@@ -49,6 +52,7 @@ SEVERITY: dict[str, str] = {
     "TRAIL_EXIT": "action",
     "TARGET2_HIT": "action",
     "TARGET1_HIT": "action",
+    "PLAN_INVALID": "warning",
     "STOP_TOUCHED": "warning",
     "THESIS_BROKEN": "warning",
     "TIGHTEN_STOP": "advice",
@@ -198,6 +202,20 @@ def assess_position(
         risk_stop = stop
     per_share_risk = (entry - risk_stop) if (risk_stop is not None and entry > risk_stop) else None
 
+    # Targets are profit levels: one at/below entry is a data-entry error, and
+    # comparing the mark against it would celebrate a loss ("target hit" on a
+    # trade that is under water). Such targets are ignored and flagged.
+    plan_faults: list[str] = []
+    if t1 is not None and t1 <= entry:
+        plan_faults.append(f"target 1 ({t1:.2f}) is at/below your entry {entry:.2f}")
+        t1 = None
+    if t2 is not None and t2 <= entry:
+        plan_faults.append(f"target 2 ({t2:.2f}) is at/below your entry {entry:.2f}")
+        t2 = None
+    if t1 is not None and t2 is not None and t2 <= t1:
+        plan_faults.append(f"target 2 ({t2:.2f}) is not above target 1 ({t1:.2f})")
+        t2 = None
+
     r_now: Optional[float] = None
     unreal_pct: Optional[float] = None
     if price is not None and entry:
@@ -249,7 +267,14 @@ def assess_position(
                 "whether it filled; if not, decide now whether the level still holds."
             )
 
-        # 2. Targets.
+        # 2. Targets (validated above — invalid ones are None here).
+        if plan_faults:
+            verdicts.append("PLAN_INVALID")
+            reasons.append(
+                "Fix this record: " + "; ".join(plan_faults) + ". A target must sit above "
+                "cost, so the Guardian ignored it rather than call a loss a 'target hit'. "
+                "Use the row's Targets button to enter real profit levels."
+            )
         if t2 is not None and price >= t2:
             verdicts.append("TARGET2_HIT")
             reasons.append(
@@ -305,6 +330,24 @@ def assess_position(
                     "The reason you bought no longer holds: " + "; ".join(broken)
                     + ". Re-read your entry note — if the setup is gone, so is the trade."
                 )
+            if entry_score is None:
+                reasons.append(
+                    "Score at entry is unknown (no trade plan stored and no snapshot on or before "
+                    "the entry date), so the score-drop half of the thesis check cannot run; only "
+                    "the SELL-signal half is active for this position."
+                )
+        else:
+            reasons.append(
+                f"No daily snapshot exists for {symbol} (it was outside the scanned universe), "
+                "so the thesis check — score and signal since entry — could not run. Held "
+                "stocks are now snapshotted at every close; this fills itself from the next session."
+            )
+        if per_share_risk is None:
+            reasons.append(
+                "Initial risk is unknown (the stop was recorded at/above cost), so R multiples "
+                "and the trailing-stop logic are unavailable. Use the row's Stop button and enter "
+                "the stop you actually had at entry to restore them."
+            )
 
         # 5. Time stop.
         if (bars_held >= settings.guardian_time_stop_bars and r_now is not None
@@ -352,6 +395,8 @@ def assess_position(
         "score_now": _num(latest_snap.get("score")) if latest_snap else None,
         "signal_now": latest_snap.get("signal") if latest_snap else None,
         "snapshot_date": latest_snap.get("date") if latest_snap else None,
+        "thesis_check": "ok" if latest_snap else "unavailable",
+        "plan_faults": plan_faults,
         "verdict": verdict,
         "severity": SEVERITY[verdict],
         "all_verdicts": verdicts,

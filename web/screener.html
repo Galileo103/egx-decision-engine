@@ -223,6 +223,7 @@
       refresh.addEventListener('click', function () { candidatesLoaded = false; loadCandidates(true); });
       head.appendChild(refresh);
       box.appendChild(head);
+      if (payload && payload.degraded) PG.warnBox(box, payload.degraded);
       box.appendChild(PG.table(rows, {
         onRow: PG.openStock,
         renderers: {
@@ -581,8 +582,11 @@
     var names = Object.keys(scanners);
     var head = PG.mk('div', { class: 'pg-form', style: 'margin-bottom:10px;align-items:center' });
     head.appendChild(PG.mk('div', { class: 'pg-muted pg-asof', style: 'margin:0;flex:1' },
-      [(card.hits_total || 0) + ' hits stored · ' + (card.outcomes || 0) + ' graded · ' + (card.hits_ungraded || 0) + ' waiting for price history'
-        + ' · weights change after ' + card.min_sample + ' graded hits']));
+      [(card.hits_total || 0) + ' hits stored · ' + (card.outcomes || 0) + ' graded'
+        + (card.outcomes_by_source && card.outcomes_by_source.replay ? ' (' + card.outcomes_by_source.replay + ' from replayed history)' : '')
+        + ' · ' + (card.hits_ungraded || 0) + ' waiting for price history'
+        + ' · weights change after ' + card.min_sample + ' graded hits'
+        + (card.baseline && card.baseline.measured ? ' · random entry beats EGX30 ' + PG.num(card.baseline.beat_rate_pct) + '% of the time (the yardstick)' : '')]));
     var grade = PG.mk('button', { type: 'button', class: 'pg-btn secondary' }, ['Grade now']);
     grade.addEventListener('click', gradeNow);
     head.appendChild(grade);
@@ -594,8 +598,13 @@
     }
     var rows = names.map(function (n) {
       var s = scanners[n], h5 = (s.horizons || {})['5'] || {}, h10 = (s.horizons || {})['10'] || {}, h20 = (s.horizons || {})['20'] || {};
+      var src = s.sources || {};
       return {
         scanner: n, hits_graded: s.hits_graded, weight: s.weight, weight_basis: s.weight_basis,
+        source: (src.live ? src.live + ' live' : '') + (src.live && src.replay ? ' · ' : '') + (src.replay ? src.replay + ' replay' : ''),
+        proxy: s.proxy || '',
+        direction: s.direction || '',
+        vs_random_10: h10.beat_vs_random_pp,
         n_10: h10.n, win_10: h10.win_rate, beat_10: h10.beat_rate, excess_10: h10.avg_excess,
         n_5: h5.n, beat_5: h5.beat_rate, excess_5: h5.avg_excess,
         n_20: h20.n, beat_20: h20.beat_rate, excess_20: h20.avg_excess
@@ -603,15 +612,27 @@
     });
     box.appendChild(PG.table(rows, {
       columns: [
-        { key: 'scanner', label: 'Scanner', numeric: false },
+        { key: 'scanner', label: 'Scanner', numeric: false, render: function (r) {
+          var w = PG.mk('span', {}, [r.scanner]);
+          if (r.direction === 'bearish') w.appendChild(PG.mk('span', { class: 'pg-badge', style: 'margin-left:6px', title: 'Bearish signal: graded on the stock FALLING' }, ['bearish']));
+          return w;
+        } },
         { key: 'hits_graded', label: 'Graded', numeric: true },
+        { key: 'source', label: 'Source', numeric: false, render: function (r) {
+          return PG.mk('span', { class: 'pg-muted', title: 'live = journaled by a real scan; replay = found by the historical replay' }, [r.source || '—']);
+        } },
+        { key: 'proxy', label: 'Weight from', numeric: false, render: function (r) {
+          if (!r.proxy) return PG.mk('span', { class: 'pg-muted' }, ['own record']);
+          return PG.mk('span', { class: 'pg-badge', title: r.weight_basis || '' }, ['proxy: ' + r.proxy]);
+        } },
         { key: 'weight', label: 'Weight', numeric: true, render: function (r) {
           var suff = r.weight_basis && r.weight_basis.indexOf('neutral') === 0;
           return PG.mk('span', { class: 'badge ' + (suff ? 'neutral' : (r.weight > 1 ? 'up' : (r.weight < 1 ? 'down' : 'accent'))), title: r.weight_basis || '' }, [PG.num(r.weight)]);
         } },
-        { key: 'n_5', label: 'n 5d', numeric: true }, { key: 'beat_5', label: 'Beat EGX30 5d %', numeric: true }, { key: 'excess_5', label: 'Avg excess 5d %', numeric: true, render: function (r) { return pctCell(r.excess_5); } },
-        { key: 'n_10', label: 'n 10d', numeric: true }, { key: 'win_10', label: 'Win 10d %', numeric: true }, { key: 'beat_10', label: 'Beat EGX30 10d %', numeric: true }, { key: 'excess_10', label: 'Avg excess 10d %', numeric: true, render: function (r) { return pctCell(r.excess_10); } },
-        { key: 'n_20', label: 'n 20d', numeric: true }, { key: 'beat_20', label: 'Beat EGX30 20d %', numeric: true }, { key: 'excess_20', label: 'Avg excess 20d %', numeric: true, render: function (r) { return pctCell(r.excess_20); } }
+        { key: 'n_5', label: 'n 5d', numeric: true }, { key: 'beat_5', label: 'Right-way 5d %', numeric: true }, { key: 'excess_5', label: 'Avg excess 5d %', numeric: true, render: function (r) { return pctCell(r.excess_5); } },
+        { key: 'n_10', label: 'n 10d', numeric: true }, { key: 'win_10', label: 'Win 10d %', numeric: true }, { key: 'beat_10', label: 'Right-way 10d %', numeric: true },
+        { key: 'vs_random_10', label: 'vs random 10d', numeric: true, render: function (r) { return pctCell(r.vs_random_10); } }, { key: 'excess_10', label: 'Avg excess 10d %', numeric: true, render: function (r) { return pctCell(r.excess_10); } },
+        { key: 'n_20', label: 'n 20d', numeric: true }, { key: 'beat_20', label: 'Right-way 20d %', numeric: true }, { key: 'excess_20', label: 'Avg excess 20d %', numeric: true, render: function (r) { return pctCell(r.excess_20); } }
       ]
     }));
     if (card.basis) box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:11.5px;margin-top:6px' }, [card.basis]));

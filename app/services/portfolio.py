@@ -393,6 +393,18 @@ def open_position(
                          "with raised_stop=true (R multiples will be unavailable).",
             }
         initial_stop: Optional[float] = stop if stop < entry else None
+        # Targets you typed yourself must be real profit levels. (Plan targets
+        # below entry were already dropped with a warning in plan_defaults.)
+        for label, val in (("target1", target1), ("target2", target2)):
+            if val is not None and float(val) <= entry:
+                return {
+                    "error": f"{label} {float(val):.2f} must be above your entry {entry:.2f}. "
+                             "A target at/below cost would make the Guardian call a loss a "
+                             "'target hit'. Leave it empty to take the plan's target, or enter "
+                             "a real profit level.",
+                }
+        if target1 is not None and target2 is not None and float(target2) <= float(target1):
+            return {"error": f"target2 ({float(target2):.2f}) must be above target1 ({float(target1):.2f})."}
         if not (note or "").strip():
             return {
                 "error": "note is required — record WHY you are taking this trade "
@@ -742,8 +754,13 @@ def update_position(
     target1: Optional[float] = None,
     target2: Optional[float] = None,
     note: Optional[str] = None,
+    initial_stop: Optional[float] = None,
 ) -> dict:
     """Adjust the CURRENT stop / targets / note of an open position.
+
+    ``initial_stop`` may be supplied ONCE, only while the record has none (a
+    winner entered with its stop already above cost): it is the stop you had
+    at entry and anchors R multiples from then on.
 
     This is how a guardian TIGHTEN_STOP suggestion is acted on. The stop may
     sit at or above entry (locking in profit); ``initial_stop`` is never
@@ -784,8 +801,26 @@ def update_position(
                 val = float(val)
                 if val <= 0:
                     return {"error": f"{col} must be > 0"}
+                if val <= entry:
+                    return {"error": f"{col} {val:.2f} must be above your entry {entry:.2f} — "
+                                     "a target at/below cost is not a profit level."}
                 sets.append(f"{col} = ?")
                 params.append(val)
+        new_t1 = float(target1) if target1 is not None else _to_float(pos.get("target1"))
+        new_t2 = float(target2) if target2 is not None else _to_float(pos.get("target2"))
+        if ((target1 is not None or target2 is not None) and new_t1 is not None
+                and new_t2 is not None and new_t2 <= new_t1):
+            return {"error": f"target2 ({new_t2:.2f}) must be above target1 ({new_t1:.2f})."}
+        if initial_stop is not None:
+            if _to_float(pos.get("initial_stop")) is not None:
+                return {"error": "initial_stop is already recorded and cannot be changed — "
+                                 "it is the risk you took at entry."}
+            initial_stop = float(initial_stop)
+            if initial_stop <= 0 or initial_stop >= entry:
+                return {"error": f"initial_stop must be below your entry {entry:.2f} — it is the "
+                                 "protective stop you had when you bought."}
+            sets.append("initial_stop = ?")
+            params.append(initial_stop)
         if note is not None:
             sets.append("note = ?")
             params.append(str(note))

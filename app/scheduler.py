@@ -307,6 +307,18 @@ def _job_weekly_maintenance() -> dict:
     except Exception as exc:
         out["pruned"] = {"error": str(exc)}
 
+    # 1b. Proven-edge table: recompute weekly so the dashboard card never
+    #     shows stale verdicts (universe backtests, minutes — Saturday is fine).
+    try:
+        from app.services import edge
+
+        result = edge.compute("EGX100", "3y", persist=True)
+        out["edge"] = ({"rows": len(result.get("rows") or []), "headline": result.get("headline"),
+                        "elapsed_s": result.get("elapsed_s")}
+                       if isinstance(result, dict) and "error" not in result else result)
+    except Exception as exc:
+        out["edge"] = {"error": str(exc)}
+
     # 2. Backup (VACUUM INTO is safe against a live database).
     try:
         out["backup"] = db.backup()

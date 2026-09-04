@@ -32,6 +32,7 @@ body { margin: 0; font-family: Archivo, system-ui, sans-serif; }
 .pg-loading { padding: 22px; color: var(--muted, #8B958F); font-size: 13px; border-radius: 8px; background: linear-gradient(90deg, var(--panel2, #1C242A) 25%, var(--panel, #161D22) 50%, var(--panel2, #1C242A) 75%); background-size: 200% 100%; animation: pg-shimmer 1.4s infinite linear; }
 @keyframes pg-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) { .pg-loading { animation: none; } }
+.pg-warn { border: 1px solid var(--warn, #D2A44C); color: var(--warn, #D2A44C); padding: 10px 13px; border-radius: 8px; background: rgba(210, 164, 76, .08); font-size: 12.5px; margin-bottom: 10px; }
 .pg-error { border: 1px solid var(--down, #E5534B); color: var(--down, #E5534B); padding: 12px 14px; border-radius: 8px; background: rgba(229, 83, 75, .08); font-size: 13px; }
 .pg-muted { color: var(--muted, #8B958F); }
 

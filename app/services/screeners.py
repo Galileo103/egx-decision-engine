@@ -590,11 +590,16 @@ def candidates(timeframe: str = "1D", persist: bool = False) -> dict:
         if persist and ranked:
             _persist_hits(ranked)
 
+        scored = ranked[:_SCORE_TOP_N]
+        scores_missing = sum(1 for e in scored if e.get("score") is None)
         return {
             "candidates": out_rows,
             "as_of": as_of,
             "timeframe": timeframe,
             "scanner_errors": scanner_errors,
+            "scores_missing": scores_missing,
+            "scores_expected": len(scored),
+            "degraded": _degraded_note(scores_missing, len(scored), live=True),
             "scored_top_n": min(_SCORE_TOP_N, len(ranked)),
             "filtered_illiquid": filtered_illiquid,
             "min_daily_value_egp": min_value,
@@ -615,6 +620,25 @@ def candidates(timeframe: str = "1D", persist: bool = False) -> dict:
         }
 
 
+def _degraded_note(missing: int, expected: int, live: bool) -> Optional[str]:
+    """Plain-language warning when the score/signal columns are blank.
+
+    Blank is not zero: a missing score means TradingView returned no analysis
+    (usually its rate limit), and the table is then ranked by scanner evidence
+    alone. Say so instead of showing dashes and letting them look like data.
+    """
+    if expected <= 0 or missing <= 0:
+        return None
+    what = "This scan" if live else "This stored scan"
+    if missing >= expected:
+        head = f"{what} has NO scores or signals for any of the {expected} candidates"
+    else:
+        head = f"{what} is missing scores for {missing} of {expected} candidates"
+    return (head + " — TradingView returned no analysis (rate limit). Ranking below is by "
+            "scanner evidence only; a blank score means unknown, not weak. Rescan in a minute "
+            "before acting on it.")
+
+
 def latest_candidates(limit: int = 20) -> dict:
     """Candidates rebuilt from the most recent persisted scanner hits — instant,
     no upstream calls. The dashboard shows this first and offers a live rescan.
@@ -622,13 +646,15 @@ def latest_candidates(limit: int = 20) -> dict:
     try:
         from app import db
 
-        d = db.query("SELECT MAX(date) AS d FROM scanner_hits WHERE scanner NOT LIKE 'pattern_%'")
+        d = db.query("SELECT MAX(date) AS d FROM scanner_hits WHERE scanner NOT LIKE 'pattern_%' "
+                     "AND COALESCE(source, 'live') = 'live'")
         date = d[0].get("d") if d else None
         if not date:
             return {"candidates": [], "as_of": None, "stored": True, "count": 0}
         rows = db.query(
             "SELECT scanner, symbol, payload_json FROM scanner_hits "
-            "WHERE date = ? AND scanner NOT LIKE 'pattern_%'", (date,)
+            "WHERE date = ? AND scanner NOT LIKE 'pattern_%' AND COALESCE(source, 'live') = 'live'",
+            (date,)
         )
         merged: dict[str, dict] = {}
         for r in rows:
@@ -665,8 +691,12 @@ def latest_candidates(limit: int = 20) -> dict:
         out.sort(key=lambda e: (e["evidence_weight"], e["family_count"], e["hit_count"],
                                 e["score"] if isinstance(e.get("score"), (int, float)) else -1.0),
                  reverse=True)
-        return {"candidates": out[:max(1, int(limit))], "as_of": date, "stored": True,
-                "count": len(out), "signal_weights": weights}
+        shown = out[:max(1, int(limit))]
+        scores_missing = sum(1 for e in shown if e.get("score") is None)
+        return {"candidates": shown, "as_of": date, "stored": True,
+                "count": len(out), "signal_weights": weights,
+                "scores_missing": scores_missing, "scores_expected": len(shown),
+                "degraded": _degraded_note(scores_missing, len(shown), live=False)}
     except Exception as exc:
         return {"error": str(exc), "candidates": [], "stored": True}
 

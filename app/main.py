@@ -28,6 +28,7 @@ try:
         routes_alerts,
         routes_backtest,
         routes_brief,
+        routes_edge,
         routes_market,
         routes_portfolio,
         routes_screener,
@@ -44,6 +45,7 @@ try:
         routes_portfolio.router,
         routes_alerts.router,
         routes_brief.router,
+        routes_edge.router,
         routes_symbols.router,
     ]
 except Exception as exc:  # noqa: BLE001

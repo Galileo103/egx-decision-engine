@@ -570,9 +570,19 @@ Stocks whose typical daily traded value (20-day median) is below the liquidity f
 
 ### 3.3 Card — `Global snapshot`
 
-**What it is** — A one-line strip of world markets fetched from Yahoo: US indices, key currencies, ETFs and crypto, each with its latest value and percentage change.
+**What it is** — A strip of the outside prices that matter to a Cairo trading day, fetched from Yahoo: first the Egypt row (USD/EGP, Brent oil, gold, silver), then US indices, US funds, key currencies and crypto — each with a readable name, its ticker, latest value and percentage change.
 
-**What you see** — Up to 14 items in a row. Each item shows the market's **name**, its **value**, and its **% change** coloured green (up), red (down) or grey (flat). A `—` means that value was unavailable. If the data arrives in an unexpected shape it is shown as a plain list instead of a strip. On failure the card shows an error box beginning `Global snapshot: …`.
+**What you see** — Five labelled rows of tiles, Egypt first. Each tile shows **what it is** in bold (for example `Brent oil`), the ticker(s) and unit in small grey type underneath (`FX:UKOIL spot · BZ=F fut · USD / barrel`), the **value** on the right with its day's **% change** coloured green (up), red (down) or grey (flat), and — for Brent, gold and silver — a second, smaller `FUT` line with the futures price and change. Hover any tile to read a one-line explanation of why it matters to an EGX trader. A `—` means that value was unavailable. A footer line gives the time of the quotes. On failure the card shows an error box beginning `Global snapshot: …`.
+
+| Row | Tiles | Why it is here |
+|---|---|---|
+| **Egypt & commodities** (teal border) | `USD / EGP` (TradingView FX_IDC:USDEGP, pounds per dollar — up means the pound weakened), `Dollar index` (TVC:DXY), `Brent oil`, `Gold`, `Silver` | The prices that move Egyptian earnings, foreign flows and local savers' choice between gold, dollars and stocks. **Brent, gold and silver show two figures**: the big one is the **spot** price from TradingView (the same UKOIL / XAUUSD / XAGUSD figure you see on a TradingView chart), the small `FUT` line underneath is the **front-month futures** contract from Yahoo (BZ=F, GC=F, SI=F). They differ by a little — futures carry storage and interest cost, so gold futures normally sit slightly above spot — and by timing, since the two sources refresh at different moments. If TradingView is pausing, the tile falls back to Yahoo and the hover text says so |
+| **US indices** | `S&P 500`, `Dow Jones`, `Nasdaq`, `VIX fear index` | World risk appetite; a VIX above 20 usually means foreign money leaves emerging markets first |
+| **US funds** | `S&P 500 ETF`, `Nasdaq-100 ETF`, `Gold ETF` | Tradable versions of the above |
+| **Currencies** | `EUR / USD`, `GBP / USD`, `JPY / USD` | Dollar strength against the majors |
+| **Crypto** | `Bitcoin`, `Ether`, `Solana`, `BNB` | A pure risk-appetite gauge |
+
+All quotes are delayed Yahoo data. The US rows show the last close when the US is shut, which is the normal case during the Cairo session.
 
 **What the buttons do** — None. Read-only information; it refreshes with the page.
 
@@ -696,6 +706,50 @@ The table shows up to 10 stocks:
 - **Then hand the name to the checklist.** A candidate that is also a green SETUP in the decision card has both a fresh trigger and a full six-pillar structure behind it. A candidate that the checklist calls NO SETUP because Trend is against it is a bounce in a downtrend — the most common way to lose money on a "great signal".
 - **Respect the empty list.** `No candidates from today's scans.` is not a broken app; it is the app declining to invent a trade. Forcing one on such a day is how you turn a quiet week into a losing one.
 - **Common mistakes:** (1) counting badges as if four badges meant four times the evidence — the families explain why they do not; (2) buying a candidate without opening its trade plan — every name here still has to pass the R:R rule on the Stock page; (3) pressing `Rescan` every few minutes during the session and expecting new names — the scanners read daily bars, so the list changes slowly.
+
+---
+
+### 3.6.1 Card — `Proven edge`
+
+**What it is** — The app's own report card. Every other card tells you what the tools *say*; this one tells you which tools have actually been *right* on EGX history, and which have not. It answers the question you should ask before trusting any signal: "has this ever worked here, on enough trades to mean something?"
+
+Three kinds of rows share one table:
+
+| Kind badge | What was measured | The two numbers |
+|---|---|---|
+| **Rule** | One of the app's four entry rules (squeeze breakout, 20-day high breakout, pullback in uptrend, three rising closes) traded on **every** EGX100 stock over the last three years, entering at the next open, exiting by the Guardian's rules, fees and slippage charged | `Samples` = trades; `Win / beat %` = winning trades; `Avg R / excess` = average R per trade (the expectancy per unit of risk) |
+| **Scanner** | A live scanner (`squeeze`, `momentum`, `volume_breakout`, `smart_money`) or one of the replayed candle rules that stands in for it, graded by the Scorecard | `Samples` = graded signals; `Win / right %` = share of signals where the stock moved the signal's way relative to EGX30 over the next 10 sessions; `vs random` = that rate minus what a random entry achieves; `Avg R / excess` = average return relative to EGX30 over those 10 sessions, in %, **signed so that + always means "the signal was right"** |
+| **Pattern** | A confirmed chart pattern (double bottom, breakout, bull trap, …) graded the same way, on its break day. A `bearish` chip marks patterns that are graded on the stock **falling** — a triple top with a 74% right-way rate means the stock lagged the index 74% of the time after it | same as Scanner |
+
+**The yardstick — read this once.** On EGX a stock bought at random beats the index over the next 10 sessions only about **44%** of the time (the app measures the exact figure on every refresh and shows it in the headline). That is not a bug: single-stock returns are skewed — most sessions lag the index a little, a few fly. Judging a signal against 50% would condemn everything, so every rate here is judged against the **random-entry rate**, and every average excess against the random-entry excess. `vs random` is the number to read.
+
+**The verdict column**, in plain words:
+
+| Badge | Means | Rule of thumb used |
+|---|---|---|
+| **Proven edge on this sample** (green) | Did clearly better than buying at random, on 20+ samples | Rules: average R of +0.20 or better after costs. Scanners/patterns: average excess at least 0.5 points above the random entry **and** beyond two standard errors (so a handful of lucky trades cannot qualify), with a right-way rate not more than 3 points below random |
+| **Coin flip — no reliable edge** (amber) | Not distinguishable from buying at random | Rules: average R between 0 and +0.20. Scanners/patterns: inside the bands above |
+| **Worse than the index — avoid or downweight** (red) | Buying at random would have done better | Rules: average R at or below zero. Scanners/patterns: average excess at least 0.5 points (and two standard errors) **below** random, or a right-way rate more than 3 points below random |
+| **Too few signals to judge** (grey) | Fewer than 20 samples — hidden from the table, counted in the footer | — |
+
+A small `replay` badge on a row means the record comes from the historical replay (below), not from live scans. Hover a verdict to read the basis sentence behind it.
+
+**What you see** — a one-sentence headline (`Of 31 rules and signals with enough history, 6 show an edge, 12 do worse than the index. Strongest: … Negative ones are downweighted in Candidates and should not be traded on their own.`), then up to 14 judged rows, rules first, then a footer with how many more rows exist and where the full table lives (Screener → Scorecard). The grey stamp shows when the table was computed; `never computed` on a fresh install.
+
+**What the buttons do**
+
+- **`Replay history`** — the important one, press it once. The app re-runs its own four entry rules and the whole pattern detector over **five years of daily candles for every EGX100 stock**, journals each historical signal, and grades it by what happened 5, 10 and 20 sessions later against EGX30. That is thousands of graded signals in about 25 minutes instead of waiting months for live hits. It runs in the background: a progress line (`Replaying history… 37 / 100 stocks (COMI) · 9 min`) replaces the buttons until it is done, and you can leave the page. Replayed rows are marked `replay` everywhere, **never** appear in Candidates or Setups, and are kept when old live hits are pruned. Pressing it again later only adds sessions that were not there before.
+- **`Refresh`** — rebuilds the table from the graded history plus four universe backtests (a few minutes, background). The weekly maintenance job (Saturday) does the same automatically.
+
+**How the verdicts change the rest of the app** — the Scorecard weights that order the `Candidates` list now rest on this record: a scanner's weight is 1 + 2 × (its right-way rate − the random-entry rate), so 46% against a 44% yardstick is 1.04 (slightly better than chance), not a red 0.92. A live scanner that has not yet collected 20 live graded hits **borrows the weight of its replayed candle rule**: `squeeze` from `squeeze_breakout`, `momentum` from `momentum_3`, `volume_breakout` from `range_breakout`. `smart_money` has no candle equivalent (it is a TradingView composite) and stays neutral until its own live record exists. The Scorecard's `Weight from` column shows which record is in use.
+
+**How to benefit from it**
+
+- **Read it before you read Candidates.** If `momentum_3` is a coin flip on 900 signals, a `momentum` badge is not evidence — it is a description of yesterday's candle. Give your attention to the families with a green verdict.
+- **A red rule is a rule to stop trading**, not to trade the other way. "Worse than the index" usually means "buys after the move is over"; the fix is patience, not shorting.
+- **Samples matter more than the percentage.** A 70% beat rate on 22 signals and a 54% beat rate on 800 signals are not comparable; the second is the more trustworthy number. That is why rows under 20 samples are hidden.
+- **Expect modest numbers.** On a liquid index a beat rate of 55–58% with positive excess *is* an edge. Anything claiming 80% on hundreds of signals is a bug, not a discovery — tell the developer.
+- **It is a past record, not a promise.** An edge measured over three years can fade. Refresh weekly, and if a green row turns amber, believe the new number.
 
 ---
 
@@ -1685,7 +1739,7 @@ How the verdict is decided: **NO SETUP** if Trend or Risk plan fails, or if two 
 **What you see**
 - The description under the heading: *Every scanner hit is graded by what the stock did 5, 10 and 20 sessions later, against EGX30 over the same window. A scanner's beat rate becomes its weight in the Candidates ranking — only after 20 graded hits, because a 60% hit rate on 5 trades is noise. Hits accumulate one day at a time from the post-close job.*
 - While loading: `Loading scorecard…`.
-- A header line: `N hits stored · M graded · K waiting for price history · weights change after 20 graded hits`, and a `Grade now` button.
+- A header line: `N hits stored · M graded (R from replayed history) · K waiting for price history · weights change after 20 graded hits`, and a `Grade now` button. The bracket appears once the historical replay has run.
 - If nothing is graded yet: `Nothing graded yet. A hit can only be graded once 5 sessions have passed since it fired, so the first rows appear about a week after the scanners start running. Come back then.`
 - A table, one row per signal source (the four Candidates scanners plus one row per confirmed pattern type that has been journaled). Columns, in screen order:
 
@@ -1693,15 +1747,17 @@ How the verdict is decided: **NO SETUP** if Trend or Risk plan fails, or if two 
 |---|---|
 | `Scanner` | The scanner's key (`squeeze`, `volume_breakout`, `smart_money`, `momentum`) or a pattern's key prefixed with `pattern_` (for example `pattern_double_bottom`, `pattern_bull_flag`) |
 | `Graded` | Hits that have an outcome row |
-| `Weight` | The scanner's multiplier in the `Candidates` ranking, as a badge. **Amber** = neutral 1.0 because fewer than 20 hits are graded at 10 days (hover to read e.g. "neutral 1.0 — 12/20 graded hits at 10d"). **Green** = above 1.0 (the scanner beats the index more often than not). **Red** = below 1.0. **Teal** = exactly 1.0 with a full sample (a 50% beat rate). Hover for the basis, e.g. "beat rate 62% over 34 hits at 10d". The formula is 2 × the 10-day beat rate, clamped between 0.5 and 1.5 |
-| `n 5d` · `Beat EGX30 5d %` · `Avg excess 5d %` | How many hits have reached 5 sessions, the share of those that beat the index, and their average return above the index (green or red) |
-| `n 10d` · `Win 10d %` · `Beat EGX30 10d %` · `Avg excess 10d %` | The same at 10 sessions, plus `Win 10d %` — the share of hits where the stock was simply *up* 10 sessions later |
-| `n 20d` · `Beat EGX30 20d %` · `Avg excess 20d %` | The same at 20 sessions |
+| `Source` | Where the graded hits came from: `N live` (journaled by real post-close scans) and/or `N replay` (found by the historical replay on the Dashboard's `Proven edge` card). Hover for the definition |
+| `Weight from` | `own record` when the weight rests on this scanner's own graded hits, or a badge `proxy: momentum_3` when a live scanner with fewer than 20 live graded hits borrows the weight of its replayed candle rule (`squeeze` → `squeeze_breakout`, `momentum` → `momentum_3`, `volume_breakout` → `range_breakout`). Hover for the full basis, e.g. "proxy: replayed 'momentum_3' beat rate 48% over 912 signals at 10d — until 'momentum' has 20 live graded hits (3 so far)" |
+| `Weight` | The scanner's multiplier in the `Candidates` ranking, as a badge. **Amber** = neutral 1.0 because fewer than 20 hits are graded at 10 days (hover to read e.g. "neutral 1.0 — 12/20 graded hits at 10d"). **Green** = above 1.0 (right more often than a random entry). **Red** = below 1.0. **Teal** = exactly 1.0 with a full sample. Hover for the basis, e.g. "right-way rate 46% over 777 hits at 10d (random entry 44%)". The formula is 1 + 2 × (the 10-day right-way rate − the random-entry rate), clamped between 0.5 and 1.5 |
+| `n 5d` · `Right-way 5d %` · `Avg excess 5d %` | How many hits have reached 5 sessions, the share of those where the stock moved the signal's way relative to EGX30, and their average excess over the index (green or red). **Bearish** signals (a `bearish` chip next to the name) are graded on the stock *falling*, so every number reads "in the signal's favour" |
+| `n 10d` · `Win 10d %` · `Right-way 10d %` · `vs random 10d` · `Avg excess 10d %` | The same at 10 sessions, plus `Win 10d %` — the share of hits where the stock simply moved the signal's way in absolute terms — and `vs random 10d`, the right-way rate minus the random-entry rate in percentage points (the number that decides the weight) |
+| `n 20d` · `Right-way 20d %` · `Avg excess 20d %` | The same at 20 sessions |
 
-- Under the table, the basis: *Each scanner hit is graded by the stock's close-to-close return 5/10/20 sessions after the hit date, and by the excess over EGX30 for the same window. A scanner's weight in the Candidates ranking = 2 × its 10-day beat rate, clamped to [0.5, 1.5], and only after 20 graded hits.* and an expandable `Full scorecard payload`.
+- Under the table, the basis sentence (grading, the bearish flip, the random-entry yardstick and the weight formula, all in one paragraph) and an expandable `Full scorecard payload`. The header line ends with `random entry beats EGX30 44% of the time (the yardstick)` once the `Proven edge` card has measured it.
 - Errors show as `Scorecard failed: …` or `Grading failed: …`.
 
-Where the hits come from: the post-close job (every trading day at 15:00) runs the Candidates scan and stores one hit per scanner per stock, and the pattern scan stores confirmed, directional patterns of quality 50 or more. A live `Refresh` on the `Candidates` tab does **not** add hits — only the scheduled post-close run does, so the track record is not polluted by you pressing buttons. (The `Scan now` button on the `Patterns` tab, by contrast, does store its confirmed patterns as hits.) Each grading run takes the oldest ungraded hits first, up to 120 at a time; a hit whose 20-day outcome is still open is re-graded on later days (at most once a day) until it completes. The weekly maintenance job (Saturday 12:00) removes hits older than 180 days, so the record is a rolling six months, not all of history.
+Where the hits come from: the post-close job (every trading day at 15:00) runs the Candidates scan and stores one hit per scanner per stock, and the pattern scan stores confirmed, directional patterns of quality 50 or more. A live `Refresh` on the `Candidates` tab does **not** add hits — only the scheduled post-close run does, so the track record is not polluted by you pressing buttons. (The `Scan now` button on the `Patterns` tab, by contrast, does store its confirmed patterns as hits.) Each grading run takes the oldest ungraded hits first, up to 120 at a time; a hit whose 20-day outcome is still open is re-graded on later days (at most once a day) until it completes. The weekly maintenance job (Saturday 12:00) removes **live** hits older than 180 days, so the live record is a rolling six months; **replayed** hits (source `replay`) are the long-run track record and are never pruned — use `Replay history` on the Dashboard to build them and its neighbour `Refresh` to rebuild the `Proven edge` table.
 
 **What the buttons do**
 - **`Grade now`** — grades whatever is ready right now: `Grading pending hits against Yahoo history…`, then a toast `Graded N hit(s), M still waiting for more sessions` (the second part only appears when something is still open), and the table reloads. Grading also happens automatically in the post-close job, so this is only for impatience.
@@ -2332,13 +2388,14 @@ If the check cannot run: `Guardian failed: …`.
 | **TRAIL EXIT** | action | The trade had already reached at least +1R on a closing basis, and the mark is now at or below the trailing level (highest close since entry minus 2.5 × the 14-day ATR by default). Not raised if EXIT STOP already applies. | `Price has given back more than 2.5xATR (0.85) from its post-entry high 52.10 (peak +2.40R, now +0.90R). The trailing exit says the move is over; take what is left.` |
 | **TARGET2 HIT** | action | The mark is at or above Target 2. | `Mark 53.00 is at/above target 2 (52.50). Book the profit or trail a tight stop — do not let a completed trade turn into a new one.` |
 | **TARGET1 HIT** | action | The mark is at or above Target 1 (and below Target 2). | `Mark 50.10 is at/above target 1 (50.00). Consider taking a partial and moving the stop to breakeven so the rest is a free trade.` |
+| **PLAN INVALID** | warning | A recorded target sits at or below your entry, or Target 2 is not above Target 1. This is a data-entry error, not a market event: the Guardian **ignores** the bad target (so a losing trade can never be reported as "target hit") and asks you to fix the record with the row's `Targets` button. Real targets on the same row are still checked normally. | `Fix this record: target 1 (6.88) is at/below your entry 7.20. A target must sit above cost, so the Guardian ignored it rather than call a loss a 'target hit'. Use the row's Targets button to enter real profit levels.` |
 | **STOP TOUCHED** | warning | The low of the most recent daily candle since entry went to or below the stop, but the mark is still above it. (When the mark is a daily close, "today" here means the last completed session.) Not raised if EXIT STOP applies. | `Today's low 45.00 pierced the stop 45.20 but the close recovered to 45.80. If you hold a resting stop order, confirm whether it filled; if not, decide now whether the level still holds.` |
 | **THESIS BROKEN** | warning | The latest daily snapshot signal for the stock contains SELL, **or** the composite score has fallen by 15 points or more (by default) since the score you bought on (taken from the trade plan stored at entry, else the nearest snapshot before entry). | `The reason you bought no longer holds: snapshot signal is SELL (2026-09-02); composite score fell 74 -> 56 since entry (plan). Re-read your entry note — if the setup is gone, so is the trade.` |
 | **TIGHTEN STOP** | advice | The trade has reached at least +1R on a closing basis, and the trailing level (highest close minus 2.5 × ATR by default, but never below your entry price) sits **above** your current stop and below the mark. The level is shown in **Suggested stop**. Not raised when TRAIL EXIT applies instead. | `Reached +1.60R. Raise the stop from 45.20 to about 48.70 (high 50.80 minus 2.5xATR 0.85, floored at breakeven) — a winner must not be allowed to become a loser.` |
 | **TIME STOP** | advice | Held for 15 or more sessions (by default) and still inside ±0.5R, with nothing else to say. | `Held 17 sessions and still +0.20R. Dead money has a cost: the capital could be in a setup that is actually moving.` |
 | **HOLD** | ok | None of the above. | `Stop intact, no target reached, thesis unchanged — nothing to do. Doing nothing is a decision too.` |
 
-Two special reasons can appear on any row: `No price available for this symbol (Yahoo and snapshots both empty) — verdict cannot be computed; check the position manually.` (the row is shown as HOLD because nothing can be judged), and `Daily history unavailable (…) — trailing-stop and time-stop checks skipped.` when the candle download failed.
+Four special reasons can appear on any row: `No price available for this symbol (Yahoo and snapshots both empty) — verdict cannot be computed; check the position manually.` (the row is shown as HOLD because nothing can be judged); `Daily history unavailable (…) — trailing-stop and time-stop checks skipped.` when the candle download failed; `No daily snapshot exists for MENA (it was outside the scanned universe), so the thesis check — score and signal since entry — could not run. Held stocks are now snapshotted at every close; this fills itself from the next session.` when the stock has never been in a post-close snapshot (every snapshot now adds your open positions and watchlist to the EGX100 universe, so this disappears after one close); and `Initial risk is unknown (the stop was recorded at/above cost), so R multiples and the trailing-stop logic are unavailable. Use the row's Stop button and enter the stop you actually had at entry to restore them.` for a winner recorded with its stop already above cost — the `Stop` button asks for that original stop once (see 7.4).
 
 The three thresholds are configurable: the ATR multiple (2.5 by default), the score drop that counts as a broken thesis (15 points by default) and the number of sessions before a time stop (15 by default).
 
@@ -2406,9 +2463,15 @@ If the table cannot load: `Positions failed: …`.
 
 **`Stop` (hover text: "Move the protective stop (act on a TIGHTEN_STOP verdict)")**
 1. Pop-up: `New protective stop for COMI (#12)` then `Current stop: 45.2 · entry: 47.1 · initial stop: 45.2` then `R multiples keep measuring against the initial stop.` Pre-filled with the current stop. A non-positive value is rejected: `Invalid stop`.
+   - If the row has **no initial stop** (you recorded a winner with its stop already above cost, so `R now` shows `n/a`), a second pop-up follows: `R multiples for ISPH are n/a because the stop was recorded above cost. What protective stop did you have AT ENTRY (below 11.65)?` Type the stop you actually had when you bought and R multiples come alive for that position; leave it empty to skip. It must be below your entry and is recorded **once** — it is the risk you took, not a number to tune later.
 2. The current stop is updated; the **initial stop is never touched**, so R now, Peak R and the closed-trade R keep measuring the risk you actually took at entry. Raising a stop can never inflate your statistics.
 3. Confirmation: `Stop for COMI set to 48.70`.
 4. Possible warnings: `Stop LOWERED from 45.20 to 44.00. Widening a stop after entry is the classic way a small loss becomes a large one — make sure this is a plan, not a hope.` and `Stop 48.70 is at/above entry 47.10: the trade is now risk-free (before fees/gaps).`
+
+**`Targets` (hover text: "Edit target 1 / target 2 (both must be above your entry)")**
+1. Pop-up: `Targets for MENA (#4) — entry 7.2` then `Type target1, target2 separated by a comma (or one value for target1 only).` Pre-filled with the current targets.
+2. Both must be **above your entry** and Target 2 above Target 1; otherwise the app refuses: `target1 6.88 must be above your entry 7.20 — a target at/below cost is not a profit level.` The same rule now applies when you open a position with typed targets — a target at or below cost is rejected up front, because the Guardian would otherwise report a loss as a target hit.
+3. Confirmation: `Targets for MENA updated`. This is how you clear a **PLAN INVALID** verdict.
 
 **`Close` (red outline)**
 1. Pop-up: `Exit price for COMI (#12):` followed, if you wrote one, by `Your entry note:` and the note in quotes — the app deliberately reads your reason back to you at the moment of exit. **The box is pre-filled with your average entry price, not the current mark** — always type your real exit price over it. Cancel does nothing; a bad price is rejected: `Invalid exit price`.

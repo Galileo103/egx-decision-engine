@@ -77,6 +77,19 @@
         </div>
       </div>
 
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-title">
+          <span>Proven edge</span>
+          <span style="display:flex;gap:8px;align-items:center">
+            <span class="as-of muted" id="edge-asof"></span>
+            <button class="btn small" id="btn-edge-replay" title="Re-run the app's rules and pattern detector over 5 years of EGX100 history and grade every signal against EGX30 (about 25 minutes, runs in the background)">Replay history</button>
+            <button class="btn small" id="btn-edge-refresh" title="Recompute the table from the graded history and universe backtests (a few minutes, background)">Refresh</button>
+          </span>
+        </div>
+        <div id="edge-progress" class="empty-note" hidden></div>
+        <div id="edge"></div>
+      </div>
+
       <div class="card">
         <div class="card-title">
           <span>Morning brief</span>
@@ -110,7 +123,15 @@
     loadToday();
     loadCandidates(false);
     loadBrief();
+    loadEdge();
+    edgeProgress();
     document.getElementById("btn-cands-live").addEventListener("click", function () { loadCandidates(true); });
+    document.getElementById("btn-edge-replay").addEventListener("click", function () {
+      startEdgeJob("/api/edge/replay", { universe: "EGX100", period: "5y", patterns: true }, "Replay");
+    });
+    document.getElementById("btn-edge-refresh").addEventListener("click", function () {
+      startEdgeJob("/api/edge/refresh", { universe: "EGX100", period: "3y" }, "Refresh");
+    });
     document.getElementById("btn-brief").addEventListener("click", generateBrief);
   });
 
@@ -347,6 +368,53 @@
   function loadGlobal() {
     var box = document.getElementById("global-strip");
     U.load(box, function () { return API.get("/api/market/global"); }, function (c, snap) {
+      // Preferred shape: labelled groups (Egypt & commodities first). Each item
+      // shows what it is, the raw ticker as a small secondary line, the value
+      // with its unit, and the day's change. Hover an item for the one-line explanation.
+      if (snap && Array.isArray(snap.groups) && snap.groups.length) {
+        var wrap = el("div", { class: "gs-groups" });
+        snap.groups.forEach(function (g) {
+          if (!g.rows || !g.rows.length) return;
+          var row = el("div", { class: "gs-group" }, [el("div", { class: "gs-group-label", text: g.label || g.key })]);
+          var items = el("div", { class: "strip" });
+          g.rows.forEach(function (r) {
+            var chg = U.pickNum(r, U.KEYS.CHANGE);
+            var fut = r.futures || null;
+            var tip = (r.what || "") + (r.unit ? " Unit: " + r.unit + "." : "")
+              + " " + (r.source ? r.source + ": " : "Ticker ") + r.symbol + "."
+              + (fut ? " Futures: " + fut.symbol + " (" + (fut.source || "Yahoo") + ")." : "");
+            var tickerLine = r.symbol + (r.kind ? " " + r.kind : "") + (fut ? " \u00b7 " + fut.symbol + " fut" : "") + (r.unit ? " \u00b7 " + r.unit : "");
+            var numCol = el("span", { class: "gs-num" }, [
+              el("span", { class: "gs-line" }, [
+                fut ? el("span", { class: "gs-kind", text: "spot" }) : null,
+                el("span", { class: "si-val", text: fmtNum(U.pickNum(r, U.KEYS.PRICE), (r.key === "usdegp" ? 2 : undefined)) }),
+                (chg === null || chg === undefined) ? null : fmtPct(chg),
+              ]),
+            ]);
+            if (fut) {
+              var fchg = U.pickNum(fut, U.KEYS.CHANGE);
+              numCol.appendChild(el("span", { class: "gs-line gs-alt" }, [
+                el("span", { class: "gs-kind", text: "fut" }),
+                el("span", { class: "si-val", text: fmtNum(U.pickNum(fut, U.KEYS.PRICE)) }),
+                (fchg === null || fchg === undefined) ? null : fmtPct(fchg),
+              ]));
+            }
+            var it = el("span", { class: "strip-item gs-item", title: tip }, [
+              el("span", { class: "gs-text" }, [
+                el("span", { class: "gs-name", text: r.name || r.symbol }),
+                el("span", { class: "gs-ticker", text: tickerLine }),
+              ]),
+              numCol,
+            ]);
+            items.appendChild(it);
+          });
+          row.appendChild(items);
+          wrap.appendChild(row);
+        });
+        if (snap.as_of) wrap.appendChild(el("div", { class: "empty-note", text: "Egypt row: spot from TradingView, futures (front month) from Yahoo; other rows Yahoo. Delayed quotes \u00b7 as of " + String(snap.as_of).slice(0, 16).replace("T", " ") + " \u00b7 hover a tile to read what it is" }));
+        c.appendChild(wrap);
+        return;
+      }
       var strip = el("div", { class: "strip" });
       var rows = U.firstArray(snap, ["markets", "indices", "snapshot", "results", "data"]);
       if (rows) {
@@ -456,6 +524,9 @@
         ? data.candidates
         : (U.firstArray(data, ["candidates", "results"]) || []);
       if (!rows.length) { c.appendChild(el("div", { class: "empty-note", text: "No candidates from today's scans." })); return; }
+      if (data && typeof data.degraded === "string" && data.degraded) {
+        c.appendChild(el("div", { class: "warn-box", text: "\u26A0 " + data.degraded }));
+      }
 
       var tbody = el("tbody");
       rows.slice(0, 10).forEach(function (r) {
@@ -487,6 +558,101 @@
         tbody,
       ])));
     }, { pill: "Running scanners… (can take a minute)", label: "Candidates" });
+  }
+
+
+  /* ---------- proven edge ---------- */
+
+  var EDGE_VERDICT_CLASS = { edge: "buy", marginal: "neutral", negative: "sell", too_few: "" };
+  var EDGE_KIND_LABEL = { rule: "Rule", scanner: "Scanner", pattern: "Pattern" };
+  var edgePollTimer = null;
+
+  function loadEdge() {
+    var box = document.getElementById("edge");
+    U.load(box, function () { return API.get("/api/edge"); }, function (c, data) {
+      setText("edge-asof", data.as_of ? "computed " + String(data.as_of).slice(0, 16).replace("T", " ") : "never computed");
+      if (data.headline) c.appendChild(el("div", { class: "empty-note", style: { fontSize: "13px" }, text: data.headline }));
+      var rows = Array.isArray(data.rows) ? data.rows : [];
+      if (!rows.length) return;
+      var judged = rows.filter(function (r) { return r.verdict !== "too_few"; });
+      var thin = rows.length - judged.length;
+      var tbody = el("tbody");
+      judged.slice(0, 14).forEach(function (r) {
+        var metric = r.edge_metric === null || r.edge_metric === undefined ? "—"
+          : (r.kind === "rule" ? (r.edge_metric >= 0 ? "+" : "") + fmtNum(r.edge_metric, 2) + "R"
+                               : (r.edge_metric >= 0 ? "+" : "") + fmtNum(r.edge_metric, 2) + "%");
+        var basis = (r.extra && r.extra.weight_basis) ? r.extra.weight_basis : (r.extra && r.extra.summary ? r.extra.summary : "");
+        var vsRandom = (r.extra && r.extra.rate_vs_random_pp !== undefined && r.extra.rate_vs_random_pp !== null)
+          ? (r.extra.rate_vs_random_pp >= 0 ? "+" : "") + fmtNum(r.extra.rate_vs_random_pp, 1) + " pp" : "—";
+        var dir = r.extra && r.extra.direction;
+        tbody.appendChild(el("tr", {}, [
+          el("td", {}, [
+            el("span", { text: r.label || r.name, title: r.name }),
+            el("span", { class: "hit-badge", text: EDGE_KIND_LABEL[r.kind] || r.kind, style: { marginLeft: "6px" } }),
+            dir === "bearish" ? el("span", { class: "hit-badge", text: "bearish", title: "Graded on the stock falling", style: { marginLeft: "4px" } }) : null,
+            (r.extra && r.extra.sources && r.extra.sources.replay) ? el("span", { class: "hit-badge", text: "replay", title: "Measured on replayed history", style: { marginLeft: "4px" } }) : null,
+          ]),
+          el("td", { class: "num", text: String(r.n === null || r.n === undefined ? "—" : r.n) }),
+          el("td", { class: "num", text: r.hit_rate === null || r.hit_rate === undefined ? "—" : fmtNum(r.hit_rate, 0) + "%" }),
+          el("td", { class: "num", text: vsRandom, title: "Right-way rate minus what a random entry achieves over the same window" }),
+          el("td", { class: "num", text: metric, title: r.metric_label || "" }),
+          el("td", {}, [el("span", { class: "badge " + (EDGE_VERDICT_CLASS[r.verdict] || ""), text: r.verdict_text || r.verdict, title: basis })]),
+        ]));
+      });
+      c.appendChild(el("div", { class: "tbl-wrap" }, el("table", { class: "tbl" }, [
+        el("thead", {}, el("tr", {}, [
+          el("th", { text: "Rule / signal" }), el("th", { class: "num", text: "Samples" }),
+          el("th", { class: "num", text: "Win / right %" }), el("th", { class: "num", text: "vs random" }),
+          el("th", { class: "num", text: "Avg R / excess" }),
+          el("th", { text: "Verdict" }),
+        ])),
+        tbody,
+      ])));
+      var foot = [];
+      if (judged.length > 14) foot.push((judged.length - 14) + " more judged rows");
+      if (thin) foot.push(thin + " with too few samples");
+      foot.push("full table: Screener → Scorecard");
+      c.appendChild(el("div", { class: "empty-note", text: foot.join(" · ") }));
+    }, { label: "Proven edge" });
+  }
+
+  function edgeProgress() {
+    var line = document.getElementById("edge-progress");
+    API.get("/api/edge/status").then(function (s) {
+      var r = s.replay || {}, e = s.edge || {};
+      var running = r.running || e.running;
+      var txt = "";
+      if (r.running) {
+        txt = "Replaying history… " + (r.done || 0) + " / " + (r.total || "?") + " stocks" + (r.detail ? " (" + r.detail + ")" : "")
+          + (r.elapsed_s ? " · " + Math.round(r.elapsed_s / 60) + " min" : "");
+      } else if (e.running) {
+        txt = "Recomputing edge table… " + (e.phase || "") + (e.detail ? " (" + e.detail + ")" : "");
+      } else if (edgePollTimer) {
+        var err = r.error || e.error;
+        txt = err ? "Background job failed: " + err : "Done.";
+        if (!err) { loadEdge(); }
+      }
+      line.hidden = !txt;
+      line.textContent = txt;
+      document.getElementById("btn-edge-replay").disabled = !!running;
+      document.getElementById("btn-edge-refresh").disabled = !!running;
+      if (running) {
+        edgePollTimer = setTimeout(edgeProgress, 5000);
+      } else if (edgePollTimer) {
+        clearTimeout(edgePollTimer); edgePollTimer = null;
+        if (r.running === false && !r.error && r.result && r.result.signals_found !== undefined && txt === "Done.") {
+          line.textContent = "Replay done: " + r.result.signals_found + " historical signals graded. Press Refresh to rebuild the table.";
+        }
+      }
+    }).catch(function () { line.hidden = true; });
+  }
+
+  function startEdgeJob(path, body, label) {
+    API.post(path, body || {}).then(function (res) {
+      if (res && res.error && !res.started) { toast(label + ": " + res.error, "error"); return; }
+      edgePollTimer = edgePollTimer || setTimeout(edgeProgress, 400);
+      edgeProgress();
+    }).catch(function (e) { document.getElementById("edge-progress").hidden = false; document.getElementById("edge-progress").textContent = label + " failed: " + e.message; });
   }
 
   /* ---------- morning brief ---------- */

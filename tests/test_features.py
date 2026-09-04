@@ -222,3 +222,111 @@ class TestLatestCandidates:
     def test_empty_when_nothing_stored(self) -> None:
         out = screeners.latest_candidates()
         assert out["candidates"] == [] and out["as_of"] is None
+
+
+class TestCandidatesDegradedFlag:
+    def test_stored_scan_without_scores_is_flagged(self) -> None:
+        import json as _json
+        for scanner, sym, payload in [
+            ("momentum", "AAA", {"price": 10.1, "current_change": 1.5}),
+            ("smart_money", "BBB", {"last_close": 5.0}),
+        ]:
+            db.execute("INSERT INTO scanner_hits (date, scanner, symbol, payload_json, created_at) VALUES (?, ?, ?, ?, 'x')",
+                       ("2026-09-03", scanner, sym, _json.dumps(payload)))
+        out = screeners.latest_candidates()
+        assert out["scores_missing"] == 2 and out["scores_expected"] == 2
+        assert "NO scores" in out["degraded"] and "rate limit" in out["degraded"]
+
+    def test_partial_and_complete_scores(self) -> None:
+        import json as _json
+        for scanner, sym, payload in [
+            ("momentum", "AAA", {"price": 10.1, "current_change": 1.5, "score": 66}),
+            ("smart_money", "BBB", {"last_close": 5.0}),
+        ]:
+            db.execute("INSERT INTO scanner_hits (date, scanner, symbol, payload_json, created_at) VALUES (?, ?, ?, ?, 'x')",
+                       ("2026-09-03", scanner, sym, _json.dumps(payload)))
+        out = screeners.latest_candidates()
+        assert out["scores_missing"] == 1 and "1 of 2" in out["degraded"]
+        assert screeners._degraded_note(0, 5, live=True) is None
+        assert screeners._degraded_note(3, 0, live=True) is None
+
+
+class TestSnapshotIncludesHeld:
+    def test_held_and_watched_symbols_are_prefixed_and_deduped(self) -> None:
+        from app.services import market, portfolio
+        for table in ("position_fills", "positions", "watchlist"):
+            db.execute(f"DELETE FROM {table}")  # noqa: S608 - fixed literals
+        portfolio.open_position("MENA", 10, 7.20, 6.60, note="x")
+        db.execute("INSERT OR IGNORE INTO watchlist (symbol, note, added_at) VALUES ('mena', '', 'x')")
+        db.execute("INSERT OR IGNORE INTO watchlist (symbol, note, added_at) VALUES ('EGX:COMI', '', 'x')")
+        syms = market.held_and_watched_symbols()
+        assert syms == ["EGX:MENA", "EGX:COMI"]
+
+
+class TestGlobalSnapshot:
+    class _A:
+        def __init__(self, close, change):
+            self.indicators = {"close": close, "change": change}
+
+    def _install(self, monkeypatch, tv_ok=True, gold_fut_ok=True):
+        from app.services import market
+        from tradingview_mcp.core.services import yahoo_finance_service as yf
+
+        monkeypatch.setattr(yf, "get_market_snapshot", lambda: {
+            "indices": [{"symbol": "^GSPC", "price": 7700.0, "change_pct": -0.4, "currency": "USD"}],
+            "crypto": [], "fx": [], "etfs": [], "timestamp": "x"})
+        tv = {"cfd": {"TVC:DXY": self._A(99.16, 0.16), "FX:UKOIL": self._A(95.89, 0.11),
+                      "TVC:GOLD": self._A(4429.8, -0.96), "TVC:SILVER": self._A(66.19, -1.13)},
+              "forex": {"FX_IDC:USDEGP": self._A(50.88, 0.2)},
+              "futures": {"COMEX:GC1!": self._A(4476.6, -1.39), "NYMEX:BZ1!": self._A(96.28, 0.8),
+                          "COMEX:SI1!": self._A(66.75, -1.41)}}
+
+        def fake_tv(screener, interval, symbols):
+            if not tv_ok:
+                raise RuntimeError("TradingView empty body")
+            return {s: tv[screener][s] for s in symbols if s in tv[screener]}
+        monkeypatch.setattr(market, "resilient_get_multiple_analysis", fake_tv)
+        quotes = {"EGP=X": {"symbol": "EGP=X", "price": 50.9, "change_pct": 0.1, "currency": "EGP"},
+                  "DX-Y.NYB": {"symbol": "DX-Y.NYB", "price": 99.157, "change_pct": 0.16, "currency": "USD"},
+                  "BZ=F": {"symbol": "BZ=F", "price": 95.83, "change_pct": 0.32, "currency": "USD"},
+                  "GC=F": ({"symbol": "GC=F", "price": 4477.2, "change_pct": -0.32, "currency": "USD"}
+                           if gold_fut_ok else {"error": "boom"}),
+                  "SI=F": {"symbol": "SI=F", "price": 66.82, "change_pct": -0.23, "currency": "USD"}}
+        monkeypatch.setattr(yf, "get_price", lambda sym: quotes[sym])
+        return market
+
+    def test_spot_primary_with_futures_alongside_and_dxy(self, monkeypatch) -> None:
+        market = self._install(monkeypatch)
+        out = market.global_snapshot()
+        assert "error" not in out
+        egypt = {r["key"]: r for r in out["egypt"]}
+        assert list(egypt) == ["usdegp", "dxy", "brent", "gold", "silver"]
+        gold = egypt["gold"]
+        assert gold["symbol"] == "TVC:GOLD" and gold["price"] == 4429.8 and gold["kind"] == "spot"
+        assert gold["source"] == "TradingView spot" and gold["name"] == "Gold" and gold["unit"] == "USD / oz"
+        assert gold["futures"]["symbol"] == "GC=F" and gold["futures"]["price"] == 4477.2
+        assert egypt["brent"]["symbol"] == "FX:UKOIL" and egypt["brent"]["futures"]["symbol"] == "BZ=F"
+        assert egypt["dxy"]["symbol"] == "TVC:DXY" and egypt["dxy"]["futures"] is None and "DXY" in egypt["dxy"]["what"]
+        assert egypt["usdegp"]["price"] == 50.88 and egypt["usdegp"]["currency"] == "EGP"
+        assert out["indices"][0]["name"] == "S&P 500" and out["indices"][0]["price"] == 7700.0
+        assert [g["key"] for g in out["groups"]] == ["egypt", "indices", "etfs", "fx", "crypto"]
+        assert out["groups"][0]["label"] == "Egypt & commodities"
+
+    def test_yahoo_futures_miss_falls_back_to_tradingview_contract(self, monkeypatch) -> None:
+        market = self._install(monkeypatch, gold_fut_ok=False)
+        gold = {r["key"]: r for r in market.global_snapshot()["egypt"]}["gold"]
+        assert gold["symbol"] == "TVC:GOLD" and gold["price"] == 4429.8
+        assert gold["futures"]["symbol"] == "COMEX:GC1!" and gold["futures"]["price"] == 4476.6
+        assert gold["futures"]["source"] == "TradingView futures (front month)"
+
+    def test_tradingview_outage_falls_back_to_yahoo_and_says_so(self, monkeypatch) -> None:
+        market = self._install(monkeypatch, tv_ok=False, gold_fut_ok=False)
+        egypt = {r["key"]: r for r in market.global_snapshot()["egypt"]}
+        # USD/EGP and DXY have Yahoo spot fallbacks
+        assert egypt["usdegp"]["symbol"] == "EGP=X" and "TradingView unavailable" in egypt["usdegp"]["source"]
+        assert egypt["dxy"]["price"] == 99.157
+        # Brent has no spot fallback: the futures quote becomes the tile, labelled
+        assert egypt["brent"]["symbol"] == "BZ=F" and egypt["brent"]["kind"] == "futures"
+        assert egypt["brent"]["futures"] is None and "spot unavailable" in egypt["brent"]["source"]
+        # Gold: no spot, futures quote failed too -> tile dropped rather than invented
+        assert "gold" not in egypt and egypt["silver"]["symbol"] == "SI=F"

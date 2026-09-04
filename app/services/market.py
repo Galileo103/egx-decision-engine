@@ -162,12 +162,191 @@ def sector_detail(sector: str, timeframe: str = "1D") -> dict:
         return {"error": str(exc)}
 
 
+#: The Egypt row: one tile per instrument. ``spot`` is a TradingView symbol
+#: (screener, symbol) — the price a TradingView user sees on UKOIL / XAUUSD /
+#: XAGUSD / DXY; ``futures`` is the Yahoo front-month contract shown alongside.
+#: ``spot_fallback`` is a Yahoo symbol used when TradingView is unavailable;
+#: ``futures_tv`` is the TradingView front-month contract used when Yahoo misses.
+EGYPT_INSTRUMENTS: tuple[dict, ...] = (
+    {"key": "usdegp", "name": "USD / EGP", "unit": "EGP per dollar",
+     "spot": ("forex", "FX_IDC:USDEGP"), "spot_fallback": "EGP=X", "futures": None},
+    {"key": "dxy", "name": "Dollar index", "unit": "DXY",
+     "spot": ("cfd", "TVC:DXY"), "spot_fallback": "DX-Y.NYB", "futures": None},
+    {"key": "brent", "name": "Brent oil", "unit": "USD / barrel",
+     "spot": ("cfd", "FX:UKOIL"), "spot_fallback": None, "futures": "BZ=F",
+     "futures_tv": ("futures", "NYMEX:BZ1!")},
+    {"key": "gold", "name": "Gold", "unit": "USD / oz",
+     "spot": ("cfd", "TVC:GOLD"), "spot_fallback": None, "futures": "GC=F",
+     "futures_tv": ("futures", "COMEX:GC1!")},
+    {"key": "silver", "name": "Silver", "unit": "USD / oz",
+     "spot": ("cfd", "TVC:SILVER"), "spot_fallback": None, "futures": "SI=F",
+     "futures_tv": ("futures", "COMEX:SI1!")},
+)
+
+#: Ticker -> what it is. Shown to the reader instead of the raw Yahoo code.
+GLOBAL_LABELS: Dict[str, Dict[str, str]] = {
+    "FX_IDC:USDEGP": {"name": "USD / EGP", "unit": "EGP per dollar",
+                     "what": "Egyptian pounds per US dollar (TradingView spot). Up = the pound weakened. The "
+                             "single biggest driver of EGX earnings, foreign flows and import-cost names."},
+    "TVC:DXY": {"name": "Dollar index", "unit": "DXY",
+                "what": "US dollar against six major currencies. A rising DXY pulls money out of emerging "
+                        "markets and pressures the pound; a falling DXY is a tailwind for EGX."},
+    "DX-Y.NYB": {"name": "Dollar index", "unit": "DXY",
+                 "what": "US dollar against six major currencies (Yahoo). A rising DXY pulls money out of "
+                         "emerging markets and pressures the pound."},
+    "FX:UKOIL": {"name": "Brent oil", "unit": "USD / barrel",
+                 "what": "Brent crude spot (TradingView UKOIL). Moves petrochemical, energy and fertiliser "
+                         "names, and Egypt's import bill. The futures figure is the front-month contract."},
+    "TVC:GOLD": {"name": "Gold", "unit": "USD / oz",
+                 "what": "Gold spot (TradingView XAUUSD). Local savers switch between gold, dollars and "
+                         "stocks; a gold spike often means risk-off. Futures usually trade a little above spot."},
+    "TVC:SILVER": {"name": "Silver", "unit": "USD / oz",
+                   "what": "Silver spot (TradingView XAGUSD). Follows gold with more swing."},
+    "EGP=X": {"name": "USD / EGP", "unit": "EGP per dollar",
+              "what": "Egyptian pounds per US dollar. Up = the pound weakened. The single biggest driver "
+                      "of EGX earnings, foreign flows and import-cost names."},
+    "BZ=F": {"name": "Brent oil", "unit": "USD / barrel",
+             "what": "Brent crude futures. Moves petrochemical, energy and fertiliser names, and Egypt's "
+                     "import bill."},
+    "GC=F": {"name": "Gold", "unit": "USD / oz",
+             "what": "Gold futures. Local savers switch between gold, dollars and stocks; a gold spike "
+                     "often means risk-off."},
+    "SI=F": {"name": "Silver", "unit": "USD / oz",
+             "what": "Silver futures. Follows gold with more swing; a metals read for the same crowd."},
+    "^GSPC": {"name": "S&P 500", "unit": "index", "what": "500 largest US companies — the world's risk barometer."},
+    "^DJI": {"name": "Dow Jones", "unit": "index", "what": "30 large US industrials."},
+    "^IXIC": {"name": "Nasdaq", "unit": "index", "what": "US technology-heavy index."},
+    "^VIX": {"name": "VIX fear index", "unit": "index",
+             "what": "Expected US volatility. Above 20 = nervous markets, foreign money leaves emerging markets first."},
+    "BTC-USD": {"name": "Bitcoin", "unit": "USD", "what": "Largest crypto asset — a global risk-appetite gauge."},
+    "ETH-USD": {"name": "Ether", "unit": "USD", "what": "Second-largest crypto asset."},
+    "SOL-USD": {"name": "Solana", "unit": "USD", "what": "Crypto asset."},
+    "BNB-USD": {"name": "BNB", "unit": "USD", "what": "Crypto asset."},
+    "EURUSD=X": {"name": "EUR / USD", "unit": "dollars per euro", "what": "Euro against the dollar."},
+    "GBPUSD=X": {"name": "GBP / USD", "unit": "dollars per pound", "what": "Sterling against the dollar."},
+    "JPYUSD=X": {"name": "JPY / USD", "unit": "dollars per yen", "what": "Yen against the dollar."},
+    "SPY": {"name": "S&P 500 ETF", "unit": "USD", "what": "Tradable S&P 500 fund."},
+    "QQQ": {"name": "Nasdaq-100 ETF", "unit": "USD", "what": "Tradable Nasdaq-100 fund."},
+    "GLD": {"name": "Gold ETF", "unit": "USD", "what": "Gold-backed fund (about a tenth of an ounce per share)."},
+}
+
+GROUP_LABELS: Dict[str, str] = {
+    "egypt": "Egypt & commodities", "indices": "US indices", "etfs": "US funds",
+    "fx": "Currencies", "crypto": "Crypto",
+}
+GROUP_ORDER: tuple[str, ...] = ("egypt", "indices", "etfs", "fx", "crypto")
+
+
+def _tv_spot_quotes(pairs: List[Tuple[str, str]]) -> Dict[str, dict]:
+    """{symbol: {price, change_pct}} from TradingView for (screener, symbol) pairs.
+    One scanner call per screener; failures leave symbols out (never raises)."""
+    out: Dict[str, dict] = {}
+    by_screener: Dict[str, List[str]] = {}
+    for screener, sym in pairs:
+        by_screener.setdefault(screener, []).append(sym)
+    for screener, syms in by_screener.items():
+        try:
+            res = resilient_get_multiple_analysis(screener=screener, interval="1d", symbols=syms)
+        except Exception:  # noqa: BLE001 - TradingView pause: fall back to Yahoo below
+            continue
+        analyses = res[0] if isinstance(res, tuple) else res
+        for sym, a in (analyses or {}).items():
+            ind = getattr(a, "indicators", None)
+            if ind is None and isinstance(a, dict):
+                ind = a.get("indicators")
+            if not isinstance(ind, dict) or ind.get("close") is None:
+                continue
+            chg = ind.get("change")
+            out[str(sym).upper()] = {"price": round(float(ind["close"]), 4),
+                                     "change_pct": round(float(chg), 2) if chg is not None else None}
+    return out
+
+
+def _yahoo_quote(sym: str) -> Optional[dict]:
+    try:
+        q = yahoo_finance_service.get_price(sym)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(q, dict) or "error" in q or q.get("price") is None:
+        return None
+    return {"symbol": str(q.get("symbol") or sym).upper(), "price": q.get("price"),
+            "change_pct": q.get("change_pct"), "currency": q.get("currency")}
+
+
+def egypt_row() -> List[dict]:
+    """Spot (TradingView) and futures (Yahoo) side by side for the Egypt tiles.
+
+    Each tile: the spot quote is primary (what a TradingView chart shows); the
+    front-month futures quote rides along as ``futures``. When TradingView is
+    pausing, the Yahoo fallback (or the futures quote itself) becomes primary and
+    ``source`` says so — a tile never silently changes meaning.
+    """
+    spots = _tv_spot_quotes([i["spot"] for i in EGYPT_INSTRUMENTS if i.get("spot")])
+    rows: List[dict] = []
+    for inst in EGYPT_INSTRUMENTS:
+        screener, tv_sym = inst["spot"]
+        spot = spots.get(tv_sym.upper())
+        futures = _yahoo_quote(inst["futures"]) if inst.get("futures") else None
+        if futures:
+            futures["source"] = "Yahoo futures (front month)"
+            futures["kind"] = "futures"
+        elif inst.get("futures_tv"):
+            tv_fut = _tv_spot_quotes([inst["futures_tv"]]).get(inst["futures_tv"][1].upper())
+            if tv_fut:
+                futures = {"symbol": inst["futures_tv"][1], "price": tv_fut["price"],
+                           "change_pct": tv_fut["change_pct"], "currency": "USD",
+                           "source": "TradingView futures (front month)", "kind": "futures"}
+        primary: Optional[dict] = None
+        if spot:
+            primary = {"symbol": tv_sym, "price": spot["price"], "change_pct": spot["change_pct"],
+                       "currency": "USD" if inst["key"] != "usdegp" else "EGP",
+                       "source": "TradingView spot", "kind": "spot"}
+        elif inst.get("spot_fallback"):
+            fb = _yahoo_quote(inst["spot_fallback"])
+            if fb:
+                primary = {**fb, "source": "Yahoo (TradingView unavailable)", "kind": "spot"}
+        if primary is None and futures:
+            primary = {**futures, "source": "Yahoo futures (spot unavailable)"}
+            futures = None
+        if primary is None:
+            continue
+        row = _labelled(primary)
+        row["name"], row["unit"] = inst["name"], inst["unit"]
+        if not row.get("what"):
+            row["what"] = (GLOBAL_LABELS.get(tv_sym) or {}).get("what")
+        row["key"] = inst["key"]
+        row["futures"] = futures
+        rows.append(row)
+    return rows
+
+
+def _labelled(row: dict) -> dict:
+    sym = str(row.get("symbol") or "").upper()
+    meta = GLOBAL_LABELS.get(sym) or {}
+    out = dict(row)
+    out["name"] = meta.get("name") or sym
+    out["unit"] = meta.get("unit")
+    out["what"] = meta.get("what")
+    return out
+
+
 def global_snapshot() -> dict:
-    """Global macro snapshot (US indices, crypto, FX, ETFs) via Yahoo."""
+    """Global macro snapshot via Yahoo: the core library's US indices / crypto / FX /
+    ETF groups, plus an Egypt-relevant group (USD/EGP, Brent, gold, silver). Every
+    row carries a readable ``name``, a ``unit`` and a one-line ``what`` so the UI
+    never has to show a bare Yahoo ticker.
+    """
     try:
         data = yahoo_finance_service.get_market_snapshot()
         if not isinstance(data, dict):
             return {"error": f"Unexpected snapshot payload type: {type(data).__name__}"}
+        data["egypt"] = egypt_row()
+        for group in GROUP_ORDER:
+            rows = data.get(group)
+            if isinstance(rows, list) and group != "egypt":
+                data[group] = [_labelled(r) for r in rows if isinstance(r, dict)]
+        data["groups"] = [{"key": g, "label": GROUP_LABELS.get(g, g), "rows": data.get(g) or []}
+                          for g in GROUP_ORDER if isinstance(data.get(g), list)]
         data["as_of"] = _as_of()
         return data
     except Exception as exc:
@@ -188,6 +367,30 @@ def _normalized_universe(universe_name: str) -> List[str]:
         full = sym if ":" in sym else f"EGX:{sym}"
         if full not in seen:
             seen.add(full)
+            out.append(full)
+    return out
+
+
+def held_and_watched_symbols() -> List[str]:
+    """Open-position + watchlist symbols, EGX-prefixed. Never raises.
+
+    The Guardian's thesis check compares today's snapshot with the one you
+    bought on; a held stock outside the scanned universe had no snapshot at
+    all, so the check silently never ran. Every snapshot now includes what
+    you hold and watch, whatever the universe.
+    """
+    out: List[str] = []
+    try:
+        rows = (db.query("SELECT symbol FROM positions WHERE status = 'open'")
+                + db.query("SELECT symbol FROM watchlist"))
+    except Exception:  # noqa: BLE001 - tables may not exist in a fresh DB
+        return out
+    for r in rows:
+        sym = str(r.get("symbol") or "").strip().upper()
+        if not sym:
+            continue
+        full = sym if ":" in sym else f"EGX:{sym}"
+        if full not in out:
             out.append(full)
     return out
 
@@ -288,7 +491,8 @@ def snapshot_egx30_index() -> dict:
         return {"error": str(exc)}
 
 
-def snapshot_universe(universe_name: str = "EGX100", timeframe: str = "1D") -> dict:
+def snapshot_universe(universe_name: str = "EGX100", timeframe: str = "1D",
+                      include_held: bool = True) -> dict:
     """Snapshot every symbol in a universe into the ``snapshots`` table.
 
     Batch-fetches indicators (200 symbols per screener call), computes
@@ -304,6 +508,12 @@ def snapshot_universe(universe_name: str = "EGX100", timeframe: str = "1D") -> d
         prefixed = _normalized_universe(universe_name)
         if not prefixed:
             return {"error": f"Unknown or empty universe: {universe_name}"}
+        extra_held = 0
+        if include_held:
+            for full in held_and_watched_symbols():
+                if full not in prefixed:
+                    prefixed.append(full)
+                    extra_held += 1
 
         fetched, batches_failed = _fetch_universe_indicators(prefixed, timeframe)
         if not fetched:
@@ -420,6 +630,7 @@ def snapshot_universe(universe_name: str = "EGX100", timeframe: str = "1D") -> d
             "universe": universe_name,
             "timeframe": timeframe,
             "total_fetched": len(fetched),
+            "held_or_watched_added": extra_held,
             "batches_failed": batches_failed,
             "as_of": created_at,
         }

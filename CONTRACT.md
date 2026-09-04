@@ -124,7 +124,13 @@ snapshots(id INTEGER PK AUTOINCREMENT, symbol TEXT, date TEXT, timeframe TEXT,
           price REAL, change_pct REAL, volume REAL, rsi REAL, bbw REAL,
           rating INTEGER, signal TEXT, score REAL, score_json TEXT, created_at TEXT,
           UNIQUE(symbol, date, timeframe))
-scanner_hits(id PK, date TEXT, scanner TEXT, symbol TEXT, payload_json TEXT, created_at TEXT)
+scanner_hits(id PK, date TEXT, scanner TEXT, symbol TEXT, payload_json TEXT, created_at TEXT,
+             source TEXT DEFAULT 'live')   -- 'replay' rows come from services/replay.py: track record only,
+                                           -- excluded from latest_candidates/setups, exempt from prune
+signal_outcomes(..., source TEXT DEFAULT 'live')  -- mirrors the hit's source
+proven_edge(kind TEXT, name TEXT, label TEXT, period TEXT, n INTEGER, hit_rate REAL, edge_metric REAL,
+            metric_label TEXT, verdict TEXT, verdict_text TEXT, extra_json TEXT, universe TEXT,
+            computed_at TEXT, PRIMARY KEY(kind, name))   -- services/edge.py, rebuilt whole on each compute
 watchlist(symbol TEXT PRIMARY KEY, note TEXT, added_at TEXT)
 alert_rules(id PK, name TEXT, rule_type TEXT, params_json TEXT, enabled INTEGER DEFAULT 1, created_at TEXT)
 alerts_fired(id PK, rule_id INTEGER, symbol TEXT, message TEXT, fired_at TEXT, delivered INTEGER DEFAULT 0)
@@ -176,7 +182,7 @@ def index_analysis(index="EGX30", timeframe="1D") -> dict
 def sectors(timeframe="1D") -> dict                  # run_egx_sector_scanner output
 def sector_detail(sector: str, timeframe="1D") -> dict
 def global_snapshot() -> dict                        # yahoo_finance_service.get_market_snapshot()
-def snapshot_universe(universe_name="EGX100", timeframe="1D") -> dict
+def snapshot_universe(universe_name="EGX100", timeframe="1D", include_held=True) -> dict  # include_held: open positions + watchlist are appended to the universe (market.held_and_watched_symbols)
 # snapshot_universe: for each symbol in universe pull overview data via egx_service internals OR
 # reuse get_egx_market_overview(limit=20) plus screen_egx_stocks; persist one row per symbol
 # into snapshots table (INSERT OR REPLACE, date = today Cairo). Returns {"saved": n, "date": ...}.
@@ -211,6 +217,30 @@ def candidates(timeframe="1D", persist=False) -> dict
 # {"candidates": [{symbol, scanners: [...], score, price, change_pct, signal, ...}], "as_of"}.
 # persist=True → write rows into scanner_hits table.
 ```
+
+### app/services/replay.py — historical replay (Phase 1, 2026-09-04)
+```python
+def rule_hits(symbol, candles) -> list[dict]      # every session an ENTRY_RULES signal fired (rules_backtest._SIGNALS)
+def pattern_hits(symbol, candles) -> list[dict]   # confirmed, directional, quality>=50 patterns on their break_date
+def run(universe='EGX100', period='5y', patterns=True, limit=None) -> dict  # journal (source='replay') + grade at once
+def start(...) / status() / summary() / clear()   # background job (services/bgjob.BackgroundJob)
+```
+### app/services/edge.py — Proven-edge table
+```python
+def rule_verdict(n, avg_r) -> 'edge'|'marginal'|'negative'|'too_few'
+def beat_verdict(n, rate_vs_random_pp, excess_vs_random, se_excess) -> same  # relative to compute_baseline()
+def compute_baseline(universe, period='5y', horizon=10) -> dict  # random-entry beat/under rate + avg excess; stored as proven_edge kind='baseline'
+def compute(universe='EGX100', period='3y', exit_rule='guardian', persist=True) -> dict  # 4 universe_runs + scorecard rows
+def latest() -> dict            # stored table, rules first; headline + summary
+def start(...) / status()       # background job; weekly_maintenance also calls compute()
+```
+### app/services/scorecard.py additions
+`PROXY_FOR = {squeeze: squeeze_breakout, momentum: momentum_3, volume_breakout: range_breakout}` — a live scanner with
+< MIN_SAMPLE graded hits at 10d inherits its proxy's weight (`weight_basis` starts with 'proxy:'; `proxy` key set).
+`invalidate_weights()`; outcomes carry `source`; `scorecard()` returns `sources` per scanner and `outcomes_by_source`.
+`signal_direction(scanner)` (pattern_catalog direction; rules/scanners = bullish) — bearish outcomes are sign-flipped so
+beat_rate/avg_excess read "in the signal's favour"; `baseline()` reads the stored random-entry yardstick (default 50%);
+weight = 1 + 2 × (right-way rate − baseline rate), clamped [0.5, 1.5]; horizons carry `se_excess`, `beat_vs_random_pp`, `excess_vs_random`.
 
 ### app/services/backtests.py
 ```python
@@ -326,7 +356,7 @@ include all routers, then `app.mount("/", StaticFiles(directory="web", html=True
 | POST /api/portfolio/positions | portfolio.open_position (stop/targets/note optional → filled from plan_defaults) |
 | GET /api/portfolio/plan-defaults/{symbol}?entry= | portfolio.plan_defaults (stop/targets/note from the stock's trade plan) |
 | POST /api/portfolio/positions/{id}/close | portfolio.close_position |
-| POST /api/portfolio/positions/{id}/update | portfolio.update_position (current stop / targets / note; initial_stop untouched) |
+| POST /api/portfolio/positions/{id}/update | portfolio.update_position (current stop / targets / note; targets must be > entry and T2 > T1; `initial_stop` may be set ONCE while NULL, must be < entry) |
 | DELETE /api/portfolio/positions/{id} | portfolio.delete_position (erase a mistaken record; refused if partial sales exist) |
 | POST /api/portfolio/positions/{id}/fill | portfolio.adjust_position (qty>0 buy → blended entry; qty<0 partial sell → realized PnL; whole qty → close) |
 | GET /api/portfolio/fills?position_id=&limit= | portfolio.position_fills (fill journal) |
@@ -340,6 +370,12 @@ include all routers, then `app.mount("/", StaticFiles(directory="web", html=True
 | GET /api/screener/scorecard | scorecard.scorecard (per-scanner 5/10/20d track record + weights) |
 | POST /api/screener/scorecard/grade | scorecard.grade (grade pending scanner_hits) |
 | GET /api/screener/scorecard/outcomes?scanner=&symbol=&limit= | scorecard.outcomes |
+| GET /api/edge | edge.latest (stored Proven-edge table) |
+| POST /api/edge/refresh {universe, period} | edge.start (background compute) |
+| GET /api/edge/status | {edge: edge.status(), replay: replay.status()} |
+| POST /api/edge/replay {universe, period, patterns, limit} | replay.start (background historical replay) |
+| GET /api/edge/replay/status | replay.status |
+| POST /api/edge/replay/clear | replay.clear (delete replayed hits + outcomes) |
 | GET /api/screener/setups?limit=&min_score= | setups.latest (stored six-pillar checklist across candidates/leaders/watchlist/holdings) |
 | POST /api/screener/setups/refresh | setups.compute(persist=True) |
 | GET /api/screener/leaders?universe=&limit= | leaders.latest (stored RS ranking) |
