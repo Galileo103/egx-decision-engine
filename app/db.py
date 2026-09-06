@@ -208,6 +208,13 @@ _MIGRATIONS: tuple[str, ...] = (
     # replay (track record only — never shown as today's candidates).
     "ALTER TABLE scanner_hits ADD COLUMN source TEXT DEFAULT 'live'",
     "ALTER TABLE signal_outcomes ADD COLUMN source TEXT DEFAULT 'live'",
+    # Session OHLC from the TradingView screener. Yahoo publishes an EGX daily
+    # bar roughly a full session late, so these let leaders.daily_candles graft
+    # the just-closed session onto the Yahoo series instead of every Yahoo-based
+    # card (checklist, levels, patterns, setups) reading one session stale.
+    "ALTER TABLE snapshots ADD COLUMN open REAL",
+    "ALTER TABLE snapshots ADD COLUMN high REAL",
+    "ALTER TABLE snapshots ADD COLUMN low REAL",
 )
 
 # Indexes on the hot query paths. Without these the 10-minute alert cycle

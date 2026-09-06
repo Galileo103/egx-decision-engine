@@ -294,6 +294,43 @@
     return box;
   }
 
+  /* Last session whose close should be final, fetched once per page. Yahoo
+     publishes an EGX daily bar about a session late, so a card can legitimately
+     be missing the session just traded — the reader has to be told, not left to
+     date-check a bare label. */
+  var _session = null;
+  function loadSession() {
+    if (_session) return _session;
+    _session = fetch("/api/market/session")
+      .then(function (r) { return r.json(); })
+      .then(function (s) { return (s && !s.error && s.last_completed_session) || null; })
+      .catch(function () { return null; });
+    return _session;
+  }
+
+  /**
+   * Write a "daily · <date>" label into `node`, saying so when `asOf` is behind
+   * the session just traded. Falls back to the plain date if the session is
+   * unknown — never invents a warning it cannot stand behind.
+   */
+  function setAsOf(node, asOf, prefix) {
+    if (!node) return;
+    if (!asOf) { node.textContent = ""; return; }
+    var label = (prefix || "daily") + " · " + asOf;
+    node.textContent = label;
+    node.classList.remove("stale");
+    node.removeAttribute("title");
+    loadSession().then(function (session) {
+      if (!session || String(asOf) >= String(session)) return;
+      node.textContent = label + " · " + session + " close not in yet";
+      node.classList.add("stale");
+      node.title = "This card is computed from daily candles that do not yet "
+        + "include the " + session + " session. Yahoo publishes EGX daily bars "
+        + "late; the header price and score come from a different feed and are "
+        + "current. Treat the levels and the plan below as " + asOf + " values.";
+    });
+  }
+
   /**
    * Standard fetch-into-container pattern: shows skeleton, runs loader(),
    * passes result to render(container, data); on failure shows inline error.
@@ -710,6 +747,7 @@
     firstArray: firstArray, findObjWith: findObjWith,
     renderObject: renderObject, renderValue: renderValue,
     skeleton: skeleton, loadingPill: loadingPill, errorBox: errorBox, load: load,
+    setAsOf: setAsOf,
     renderSidebar: renderSidebar, renderTopbar: renderTopbar, renderFooter: renderFooter,
     loadCatalog: loadCatalog, matchSymbols: matchSymbols, attachAutocomplete: attachAutocomplete,
     KEYS: { PRICE: PRICE_KEYS, CHANGE: CHANGE_KEYS, VOLUME: VOLUME_KEYS, SYMBOL: SYMBOL_KEYS, SIGNAL: SIGNAL_KEYS },

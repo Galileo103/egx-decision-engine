@@ -349,6 +349,8 @@ a:hover { text-decoration: underline; }
   margin-bottom: 12px;
 }
 .card-title .as-of { font-weight: 400; letter-spacing: 0; text-transform: none; font-size: 11px; }
+/* Card is missing the session just traded — must not read as a normal label. */
+.card-title .as-of.stale { color: var(--warn); cursor: help; }
 
 .grid { display: grid; gap: 14px; }
 .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -614,6 +616,20 @@ a:hover { text-decoration: underline; }
 }
 .star-btn:hover { transform: scale(1.15); color: var(--warn); }
 .star-btn.on { color: var(--warn); }
+.refresh-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 19px;
+  line-height: 1;
+  color: var(--muted);
+  padding: 4px;
+  transition: color 0.12s, transform 0.2s;
+}
+.refresh-btn:hover { color: var(--warn); transform: rotate(90deg); }
+.refresh-btn:disabled { opacity: 0.5; cursor: progress; }
+.refresh-btn.spin { animation: refresh-spin 0.9s linear infinite; }
+@keyframes refresh-spin { to { transform: rotate(360deg); } }
 
 /* ---------- States: loading / error / empty ---------- */
 

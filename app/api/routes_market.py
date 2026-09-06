@@ -6,9 +6,28 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
+from app import calendar_egx
 from app.services import market
 
 router = APIRouter(prefix="/api/market", tags=["market"])
+
+
+@router.get("/session")
+async def market_session() -> dict[str, Any]:
+    """Session state plus the last session whose closing bar should be final.
+
+    The pages compare a card's ``as_of`` against ``last_completed_session`` to
+    say plainly when a card is missing the session just traded, instead of
+    showing a bare date the reader has to date-check themselves.
+    """
+    try:
+        state = calendar_egx.session_state()
+        state["last_completed_session"] = (
+            calendar_egx.last_completed_session().strftime("%Y-%m-%d")
+        )
+        return state
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
 
 
 @router.get("/overview")

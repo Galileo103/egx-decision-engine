@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import bisect
 import json
+import logging
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,6 +23,8 @@ from tradingview_mcp.core.utils.validators import EXCHANGE_SCREENER
 
 from app import calendar_egx, db
 from app import symbols as symbols_mod
+
+logger = logging.getLogger(__name__)
 
 # ── In-memory TTL cache ────────────────────────────────────────────────────────
 
@@ -65,6 +68,15 @@ def _session() -> dict:
         return calendar_egx.session_state()
     except Exception as exc:
         return {"error": str(exc)}
+
+
+def _num(value: Any) -> Optional[float]:
+    """Float or None — rejects NaN, which SQLite stores but arithmetic poisons."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out else None
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -491,6 +503,128 @@ def snapshot_egx30_index() -> dict:
         return {"error": str(exc)}
 
 
+def session_bar(symbol: str, timeframe: str = "1D") -> Optional[dict]:
+    """The just-closed session's candle for `symbol`, from the snapshots table.
+
+    Yahoo publishes an EGX daily bar roughly a full session late (a session's
+    bar shows up as an all-null row and only fills the next day), so the Yahoo
+    series is always missing the session the user is actually deciding on. The
+    snapshot written at 15:00 by the post-close job already holds that session's
+    TradingView OHLCV; this returns it in history.py's candle shape so
+    leaders.daily_candles can graft it on.
+
+    Returns None unless a row exists for the last COMPLETED session carrying a
+    full, self-consistent OHLC. A partial or half-written row must never reach
+    the pattern and level detectors dressed as a real bar.
+    """
+    bare = str(symbol).split(":", 1)[-1].upper()
+    try:
+        session = calendar_egx.last_completed_session().strftime("%Y-%m-%d")
+        rows = db.query(
+            "SELECT date, price, open, high, low, volume FROM snapshots "
+            "WHERE symbol = ? AND date = ? AND timeframe = ? LIMIT 1",
+            (bare, session, timeframe),
+        )
+    except Exception as exc:
+        logger.warning("session_bar(%s) lookup failed: %s", symbol, exc)
+        return None
+    if not rows:
+        return None
+    row = rows[0]
+    o, h, low, c = (_num(row.get("open")), _num(row.get("high")),
+                    _num(row.get("low")), _num(row.get("price")))
+    if None in (o, h, low, c):
+        return None
+    if min(o, h, low, c) <= 0 or h < low:  # type: ignore[type-var]
+        return None
+    vol = _num(row.get("volume"))
+    return {
+        "time": session,
+        "open": round(o, 4),      # type: ignore[arg-type]
+        "high": round(h, 4),      # type: ignore[arg-type]
+        "low": round(low, 4),     # type: ignore[arg-type]
+        "close": round(c, 4),     # type: ignore[arg-type]
+        "volume": vol if vol is not None else 0.0,
+        "source": "tv_snapshot",
+    }
+
+
+def snapshot_symbol(symbol: str, timeframe: str = "1D") -> dict:
+    """On-demand snapshot of ONE symbol's just-closed session from TradingView.
+
+    For a stock outside the nightly snapshot universe this is what lets the
+    Yahoo-lag graft (`session_bar`) work at all. Refuses to run while the
+    session is open: TradingView's bar is then a moving partial, and stamping
+    it as the session's close would poison every downstream computation.
+
+    When the session's row already exists (written by the nightly job) only
+    price/change/volume/OHLC are refreshed. Score and the rank-dependent fields
+    are left alone — a one-symbol call has no cross-section to rank against,
+    and rewriting them would make the same stock score differently depending on
+    whether someone pressed a button.
+    """
+    bare = str(symbol).split(":", 1)[-1].upper()
+    try:
+        if calendar_egx.is_market_open():
+            return {"skipped": "session open — TradingView's bar is still moving", "symbol": bare}
+        full = f"EGX:{bare}"
+        fetched, batches_failed = _fetch_universe_indicators([full], timeframe)
+        ind = fetched.get(full) or (next(iter(fetched.values())) if fetched else None)
+        if not ind:
+            return {"error": f"TradingView returned no data for {bare}", "symbol": bare,
+                    "batches_failed": batches_failed}
+        metrics = compute_metrics(ind) or {}
+        price = _num(metrics.get("price"))
+        if price is None:
+            return {"error": f"TradingView bar for {bare} has no price", "symbol": bare}
+        now = calendar_egx.now_cairo()
+        session = calendar_egx.last_completed_session(now).strftime("%Y-%m-%d")
+        o, h, low = _num(ind.get("open")), _num(ind.get("high")), _num(ind.get("low"))
+        vol = _num(ind.get("volume"))
+        existing = db.query(
+            "SELECT id FROM snapshots WHERE symbol = ? AND date = ? AND timeframe = ?",
+            (bare, session, timeframe),
+        )
+        if existing:
+            db.execute(
+                "UPDATE snapshots SET price = ?, change_pct = ?, volume = ?, open = ?, high = ?, low = ? "
+                "WHERE id = ?",
+                (price, metrics.get("change"), vol, o, h, low, existing[0]["id"]),
+            )
+            action = "updated"
+        else:
+            score: Optional[float] = None
+            score_json: Optional[str] = None
+            try:
+                result = compute_stock_score(ind, change_pct_rank=None, currency=_get_currency(full))
+                if result:
+                    score = result.get("score")
+                    score_json = json.dumps(
+                        {k: result.get(k) for k in
+                         ("score", "grade", "trend_state", "breakdown", "signals", "penalties")},
+                        default=str,
+                    )
+            except Exception:
+                pass  # score stays NULL — the bar is still worth persisting
+            rsi_raw = ind.get("RSI")
+            rsi = round(float(rsi_raw), 2) if isinstance(rsi_raw, (int, float)) else None
+            db.execute(
+                "INSERT INTO snapshots "
+                "(symbol, date, timeframe, price, change_pct, volume, rsi, bbw, rating, signal, "
+                " score, score_json, created_at, open, high, low) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (bare, session, timeframe, price, metrics.get("change"), vol, rsi, metrics.get("bbw"),
+                 metrics.get("rating"), metrics.get("signal"), score, score_json, now.isoformat(),
+                 o, h, low),
+            )
+            action = "inserted"
+        return {"symbol": bare, "date": session, "action": action, "price": price,
+                "open": o, "high": h, "low": low, "volume": vol,
+                "ohlc_complete": None not in (o, h, low), "as_of": now.isoformat()}
+    except Exception as exc:
+        return {"error": str(exc), "symbol": bare}
+
+
 def snapshot_universe(universe_name: str = "EGX100", timeframe: str = "1D",
                       include_held: bool = True) -> dict:
     """Snapshot every symbol in a universe into the ``snapshots`` table.
@@ -596,6 +730,9 @@ def snapshot_universe(universe_name: str = "EGX100", timeframe: str = "1D",
                 score,
                 score_json,
                 created_at,
+                _num(ind.get("open")),
+                _num(ind.get("high")),
+                _num(ind.get("low")),
             ))
 
         # One transaction for the whole universe: no partial dates on a crash,
@@ -606,8 +743,8 @@ def snapshot_universe(universe_name: str = "EGX100", timeframe: str = "1D",
                 db.executemany(
                     "INSERT OR REPLACE INTO snapshots "
                     "(symbol, date, timeframe, price, change_pct, volume, rsi, bbw, "
-                    " rating, signal, score, score_json, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " rating, signal, score, score_json, created_at, open, high, low) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     pending,
                 )
                 saved = len(pending)

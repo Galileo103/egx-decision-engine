@@ -23,6 +23,7 @@
         <span class="sh-chg" id="sh-chg">—</span>
         <span id="sh-signal"></span>
         <button class="star-btn" id="star-btn" title="Toggle watchlist">☆</button>
+        <button class="refresh-btn" id="refresh-btn" title="Refresh this stock: pull today's close from TradingView into the snapshot and re-read Yahoo now (instead of waiting up to 4 hours for the cache)">↻</button>
       </div>
 
       <div class="grid grid-main">
@@ -158,6 +159,7 @@
     loadLevels();
     loadMtf();
     loadWatchlistState();
+    document.getElementById("refresh-btn").addEventListener("click", refreshStock);
     setupTabs();
     loadTab("smart");
 
@@ -335,7 +337,7 @@
     API.get("/api/stocks/" + encodeURIComponent(SYMBOL) + "/checklist").then(function (c) {
       U.clear(box);
       if (!c || c.error) { box.appendChild(el("div", { class: "muted", text: "Checklist unavailable: " + (c && c.error) })); return; }
-      document.getElementById("check-asof").textContent = c.as_of ? "daily · " + c.as_of : "";
+      U.setAsOf(document.getElementById("check-asof"), c.as_of);
       var verdictCls = c.verdict === "setup" ? "up" : (c.verdict === "no_setup" ? "sell" : "neutral");
       var head = el("div", { style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px" });
       head.appendChild(el("span", { class: "badge " + verdictCls, text: (c.verdict === "setup" ? "SETUP" : (c.verdict === "no_setup" ? "NO SETUP" : "WATCH")) }));
@@ -375,7 +377,7 @@
       U.clear(box);
       if (!lv || lv.error) { box.appendChild(el("div", { class: "muted", text: "Levels unavailable: " + (lv && lv.error) })); return; }
       state.levels = lv;
-      document.getElementById("lv-asof").textContent = lv.as_of ? "daily · " + lv.as_of : "";
+      U.setAsOf(document.getElementById("lv-asof"), lv.as_of);
       var posCls = lv.position === "at support" || lv.position === "breaking out" ? "up" : (lv.position === "at resistance" ? "sell" : "neutral");
       var head = el("div", { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px" });
       head.appendChild(el("span", { class: "badge " + posCls, text: String(lv.position || "").toUpperCase() }));
@@ -443,7 +445,7 @@
     API.get("/api/stocks/" + encodeURIComponent(SYMBOL) + "/patterns").then(function (p) {
       var rows = p && Array.isArray(p.patterns) ? p.patterns : [];
       state.patterns = rows;
-      document.getElementById("pat-asof").textContent = p && p.as_of ? "daily · " + p.as_of : "";
+      U.setAsOf(document.getElementById("pat-asof"), p && p.as_of);
       U.clear(box);
       if (p && p.error && !rows.length) {
         box.appendChild(el("div", { class: "muted", text: "Patterns unavailable: " + p.error }));
@@ -875,6 +877,26 @@
 
   var chartCandles = null;
 
+  /* Pull today's close from TradingView into this stock's snapshot (so the
+     Yahoo-lag graft works even outside the nightly universe), drop the cached
+     candles, then reload every card. Header price/score are TradingView anyway. */
+  function refreshStock() {
+    var btn = document.getElementById("refresh-btn");
+    btn.disabled = true; btn.classList.add("spin");
+    API.post("/api/stocks/" + encodeURIComponent(SYMBOL) + "/refresh", {}).then(function (r) {
+      var s = (r && r.snapshot) || {};
+      if (r && r.error) toast("Refresh failed: " + r.error, "warn");
+      else if (s.error) toast("TradingView gave no bar for " + SYMBOL + " — re-read Yahoo only. " + s.error, "warn");
+      else if (s.skipped) toast("Market is open, so today's bar is not final yet — re-read Yahoo only. Press again after 14:30 for today's close.", "warn");
+      else toast("Refreshed: " + s.date + " close " + fmtNum(s.price) + " from TradingView (" + s.action + ").", "ok");
+      loadDetail(); loadChart(); loadChecklist(); loadLevels(); loadMtf();
+    }).catch(function (e) {
+      toast("Refresh failed: " + e.message, "warn");
+    }).finally(function () {
+      btn.disabled = false; btn.classList.remove("spin");
+    });
+  }
+
   function loadChart() {
     API.get("/api/stocks/" + encodeURIComponent(SYMBOL) + "/history?range=1y&interval=1d").then(function (h) {
       chartCandles = U.firstArray(h, ["candles", "history", "data"]) || [];
@@ -893,7 +915,18 @@
       }
       applyPlanOverlays();
       var n = chartCandles.length;
-      if (n) document.getElementById("chart-note").textContent = n + " candles";
+      var note = document.getElementById("chart-note");
+      if (h && h.dead_feed) {
+        note.textContent = "Yahoo feed frozen at " + fmtNum(h.frozen_close) + " since " + (h.frozen_since || "?") + " · not used for signals";
+        note.classList.add("stale");
+        note.title = "Yahoo has reported this same close with zero volume for every session since " + (h.frozen_since || "?")
+          + ". The line below is that dead feed, not the stock. The header price and Score come from TradingView and are current; "
+          + "the checklist, levels and patterns cannot be computed for this stock until Yahoo's feed comes back.";
+      } else {
+        note.classList.remove("stale");
+        note.removeAttribute("title");
+        if (n) note.textContent = n + " candles";
+      }
     }).catch(function (e) {
       var box = document.getElementById("chart");
       box.innerHTML = "";

@@ -84,6 +84,24 @@ def last_trading_day(d: date | None = None) -> date:
     return d
 
 
+def last_completed_session(dt: datetime | None = None) -> date:
+    """Most recent session whose closing bar is final (default: now, Cairo).
+
+    Distinct from `last_trading_day`, which returns today while today's session
+    is still running. Anything that grafts a session bar onto a candle series
+    must use this one: mid-session the day's OHLC is still moving, and a partial
+    bar reads as a real one to the pattern and level detectors.
+    """
+    if dt is None:
+        dt = now_cairo()
+    elif dt.tzinfo is not None:
+        dt = dt.astimezone(CAIRO)
+    d = dt.date()
+    if is_trading_day(d) and dt.time() >= SESSION_CLOSE:
+        return d
+    return last_trading_day(d - timedelta(days=1))
+
+
 def is_market_open(dt: datetime | None = None) -> bool:
     """True if the EGX session is open at `dt` (default: now, Cairo time)."""
     if dt is None:

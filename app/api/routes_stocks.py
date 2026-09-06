@@ -69,9 +69,56 @@ async def stock_history(
     range: str = Query("1y", alias="range"),
     interval: str = Query("1d"),
 ) -> dict[str, Any]:
-    """OHLCV candle history via Yahoo chart API (cached)."""
+    """OHLCV candle history via Yahoo chart API (cached).
+
+    On the daily interval the candles come from ``leaders.daily_candles``, the
+    same grafted series the checklist and levels are computed from — Yahoo is a
+    session late, and a chart printing Thursday's close beside a checklist
+    quoting today's is the confusion this whole path exists to avoid.
+    """
     try:
-        return await asyncio.to_thread(history.get_history, symbol, range, interval)
+        payload = await asyncio.to_thread(history.get_history, symbol, range, interval)
+        if (isinstance(payload, dict) and "error" not in payload
+                and str(interval).lower() in ("1d", "d", "1day", "daily")):
+            from app.services import leaders
+
+            grafted = await asyncio.to_thread(leaders.daily_candles, symbol, range)
+            raw = payload.get("candles") or []
+            if grafted:
+                payload = dict(payload)
+                payload["candles"] = grafted
+            elif leaders.is_dead_feed(raw):
+                # The raw line is still drawn (it is what Yahoo says), but the
+                # page must be told it is a frozen ticker, not a flat stock.
+                payload = dict(payload)
+                payload["dead_feed"] = True
+                payload["frozen_close"] = raw[-1].get("close")
+                i = len(raw) - 1
+                while (i > 0 and raw[i - 1].get("close") == raw[-1].get("close")
+                       and not raw[i - 1].get("volume")):
+                    i -= 1
+                payload["frozen_since"] = raw[i].get("time")
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
+@router.post("/{symbol}/refresh")
+async def stock_refresh(symbol: str) -> dict[str, Any]:
+    """On-demand refresh of one stock.
+
+    Pulls the just-closed session from TradingView into the snapshot (so the
+    Yahoo-lag graft has a bar even for a stock outside the nightly universe)
+    and drops this symbol's cached candles, so the cards re-read Yahoo now
+    instead of after the 4-hour TTL.
+    """
+    try:
+        from app.services import leaders, market
+
+        snapshot = await asyncio.to_thread(market.snapshot_symbol, symbol)
+        cleared = leaders.invalidate(symbol) + history.invalidate(symbol)
+        return {"symbol": symbol.upper(), "snapshot": snapshot, "caches_cleared": cleared,
+                "as_of": calendar_egx.now_cairo().isoformat()}
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
 

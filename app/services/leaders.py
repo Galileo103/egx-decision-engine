@@ -65,8 +65,28 @@ def daily_candles(symbol: str, range_: str = "1y") -> list[dict]:
     Wraps history.get_history with a longer in-process TTL so the scorecard
     and the leaders scan — which touch the same 100 symbols — do not refetch.
     Returns [] when unavailable.
+
+    Yahoo publishes an EGX daily bar roughly a full session late: the session
+    that just closed arrives as an all-null row (dropped below) and only fills
+    the next day. Left alone, every card computed from these candles — the
+    checklist, levels, patterns, the scanners and setups — reads one session
+    stale, which for a post-close decision is the one session that matters. So
+    the just-closed session is grafted on from the snapshot the post-close job
+    already wrote from TradingView (`market.session_bar`). The two sources agree
+    on closes to the piastre; TradingView volume can differ by a couple of
+    percent, which is immaterial to a 20-day volume average.
     """
-    key = f"{symbol.upper()}|{range_}"
+    # The expected session is part of the cache key on purpose. A fetch made
+    # while the market was still open (the 10-minute intraday job) legitimately
+    # has no bar for today, and with a plain key that entry would shadow the
+    # post-close stitch for the rest of the 4-hour TTL.
+    try:
+        from app import calendar_egx
+
+        session = calendar_egx.last_completed_session().strftime("%Y-%m-%d")
+    except Exception:  # noqa: BLE001 — never let the calendar break a fetch
+        session = ""
+    key = f"{symbol.upper()}|{range_}|{session}"
     now = time.monotonic()
     with _lock:
         hit = _candle_cache.get(key)
@@ -86,12 +106,70 @@ def daily_candles(symbol: str, range_: str = "1y") -> list[dict]:
         if isinstance(c, dict) and _num(c.get("close")) is not None
     ]
     candles.sort(key=lambda c: str(c.get("time")))
+    if is_dead_feed(candles):
+        # Yahoo carries some EGX tickers as a flat line with zero volume for
+        # months (ORAS sat at 71.05 for a year while trading ~850). A flat line
+        # yields no signals on its own, but graft one real session onto it and
+        # it becomes a +1000% "breakout" — so the whole series is unusable.
+        logger.warning("daily_candles(%s): Yahoo series is a dead feed (flat close, zero volume) — ignored",
+                       symbol)
+        candles = []
+    # Requires a real Yahoo series to graft onto: when Yahoo has nothing for a
+    # symbol, one snapshot bar is not history, and a 1-bar series is worse than
+    # an empty one to every caller that guards on bar count.
+    if session and candles and str(candles[-1].get("time")) < session:
+        bar = _session_bar(symbol)
+        # Only ever appends: a bar dated at or before what Yahoo already has is
+        # dropped rather than allowed to overwrite the authoritative history.
+        if bar and str(bar.get("time")) > str(candles[-1].get("time")):
+            candles = candles + [bar]
     with _lock:
         _candle_cache[key] = (now, candles)
         if len(_candle_cache) > 400:
             for k, _ in sorted(_candle_cache.items(), key=lambda kv: kv[1][0])[:100]:
                 _candle_cache.pop(k, None)
     return candles
+
+
+def invalidate(symbol: str) -> int:
+    """Drop every cached candle series for `symbol` (all ranges/sessions).
+
+    The on-demand stock refresh calls this so a Yahoo backfill — or a snapshot
+    row that did not exist a minute ago — is seen now, not after the 4-hour TTL.
+    """
+    prefix = f"{symbol.upper()}|"
+    with _lock:
+        keys = [k for k in _candle_cache if k.startswith(prefix)]
+        for k in keys:
+            _candle_cache.pop(k, None)
+    return len(keys)
+
+
+_DEAD_FEED_BARS = 10
+
+
+def is_dead_feed(candles: list[dict]) -> bool:
+    """True when the last bars are one unchanging close with no volume at all.
+
+    A genuinely suspended stock looks the same, and dropping it is right too:
+    nothing traded, so nothing can be a signal.
+    """
+    tail = candles[-_DEAD_FEED_BARS:]
+    if len(tail) < _DEAD_FEED_BARS:
+        return False
+    closes = {c.get("close") for c in tail}
+    return len(closes) == 1 and not any(_num(c.get("volume")) for c in tail)
+
+
+def _session_bar(symbol: str) -> Optional[dict]:
+    """market.session_bar, imported lazily (market imports this module's peers)."""
+    try:
+        from app.services import market
+
+        return market.session_bar(symbol)
+    except Exception as exc:  # noqa: BLE001 — the graft is an enhancement
+        logger.warning("session_bar(%s) unavailable: %s", symbol, exc)
+        return None
 
 
 def _proxy_index(symbols: list[str], range_: str = "1y") -> dict[str, float]:

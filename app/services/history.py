@@ -146,6 +146,19 @@ def _stale_or_error(key: tuple[str, str, str], now: float, error: dict,
     return error
 
 
+def invalidate(symbol: str) -> int:
+    """Forget every cached response (good and failed) for `symbol`."""
+    yahoo_symbol = tv_to_yahoo(symbol)
+    with _cache_lock:
+        keys = [k for k in _cache if k[0] == yahoo_symbol]
+        neg_keys = [k for k in _neg_cache if k[0] == yahoo_symbol]
+        for k in keys:
+            _cache.pop(k, None)
+        for k in neg_keys:
+            _neg_cache.pop(k, None)
+    return len(keys) + len(neg_keys)
+
+
 def get_history(symbol: str, range_: str = "1y", interval: str = "1d") -> dict:
     """Fetch OHLCV history for an EGX symbol from Yahoo Finance.
 
