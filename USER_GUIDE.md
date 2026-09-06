@@ -265,6 +265,8 @@ Hover over the chip for the explanation: `When this page last received data from
 
 **What it is** — The box at the right of the top bar, marked with a `⌕` magnifier. It finds any EGX-listed stock by ticker **or by company name** and opens its Stock page.
 
+The same dropdown (added 2026-09-05) now appears on **every symbol field in the app**: the four boxes on the Compare page, `Symbol` in the Portfolio's New position form, and the two symbol fields on the Backtest page. There it fills the field instead of navigating — pick a name and the field is set (on New position this also fetches the stock's plan defaults). Enter with a highlighted row picks it; Enter with the list open and nothing highlighted picks the first match; Enter with the list closed submits the form as usual.
+
 **What you see**
 
 | Element | Meaning |
@@ -1778,6 +1780,45 @@ Where the hits come from: the post-close job (every trading day at 15:00) runs t
 - **Watch the `pattern_…` rows fill in.** After a few months this table is the only place that tells you whether a head & shoulders or a bull flag has predicted anything on EGX. Weight your attention on the `Patterns` tab toward the shapes with green excess here (the `Catalog` shows the same 10-day numbers next to each pattern's name).
 - **Use it to explain the `Candidates` order.** When a stock ranks above another with the same family count, look here: it is being lifted by a scanner with a green weight. When a scanner turns red, its hits are demoted automatically — you do not need to do anything, but you should stop treating that scanner's badge on the `Candidates` tab as confirmation.
 - Common mistake: reading the average excess without the count. A large average on a handful of hits is one lucky stock; a small positive average on many hits is an edge you can size around. Sort by the `n` columns first.
+
+---
+
+### 5.10 Page — `Compare` (two to four stocks side by side) ⭐
+
+**What it is** — The app answers "is this stock a trade?" one stock at a time. Most mornings the real question is "I have three names, which one gets the money?" — and on the Portfolio page, "which position do I trim first?". The Compare page (sidebar → **Compare**, or `compare.html?symbols=GSSC,ALCN,COMI`) puts two to four symbols in columns and shows the same rows for each, then **names a winner and says why the others lost, in words**. Nothing here is new data — every row is one of the app's existing cards called for several symbols at once.
+
+**How to get there** — the **`Compare top 3`** button on the Screener's `Candidates` tab (the three highest-evidence candidates), the **`Compare holdings`** button above the Portfolio's `Open positions` table (up to four), the sidebar link (type the symbols yourself), or a link with `?symbols=` in the address.
+
+**The rows**
+
+| Row | What it shows |
+|---|---|
+| `Verdict` | The buy checklist verdict (SETUP / WATCH / NO SETUP, with the pillar count) and its headline |
+| `Six pillars` | Trend, S/R, Vol, PA, Pat, Risk as ✓ / ⚠ / ✗ chips — the crosses are what decide most comparisons |
+| `Price` | Last close |
+| `Risk plan` | The levels-based plan: entry, stop under the nearest tested support, first target at the nearest resistance, and the **reward-to-risk** badge (green ≥ 2R, amber ≥ 1R, red under 1R) with the stop distance |
+| `Shares at your risk` | Position size at your risk % and its cost |
+| `Evidence today` | Every journaled signal on the stock today (scanner, proven rule, confirmed pattern) with its Scorecard weight and Proven-edge verdict, and the summed **evidence weight** — the same family-based sum the Candidates list uses, so patterns are listed but not added (six overlapping shape names must not out-weigh one clean breakout) |
+| `Strongest measured edge` | The single signal present today with a proven edge, and how far it beat a random entry |
+| `Rel. strength 1m / 3m` | Return minus EGX30 in points, and distance from the 52-week high |
+| `Liquidity` | 20-day median traded value; red when below the floor |
+| `Extension` | How many ATR above the 20-day average — over 2 is stretched, over 3 is usually a late entry |
+| `Sector / held there` | The stock's sector and how many open positions you already have in it |
+| `Heat after trade` | Total open risk across the book if you add this trade at your risk %; red when it would breach the 6% cap |
+| `Sell check (held)` | Only when at least one column is a position you hold: its HOLD / REDUCE / EXIT verdict, exit / reduce / trail levels, and the six sell pillars |
+
+The winning column is tinted teal with a `#1` tag; the others show their rank.
+
+**How the ranking works** — deliberately simple and readable, not a blended score: (1) a stock with **no failing pillar** beats any stock with one; (2) then the checklist verdict, setup over watch over no setup; (3) then **reward-to-risk** of the plan; (4) then the evidence weight; (5) then one-month relative strength. The headline reads like *"GSSC first: no failing pillar, 2.4R to the first target, evidence 2.07, range breakout is a measured edge (n=4015). COMI waits: risk against it (0.8R to the first resistance 145.01 — wait for a pullback toward support or a close above it). ALCN: same verdict but less room — 1.6R versus 2.4R."* When every column has a failing pillar the headline says **No clean winner** and names the one with the fewest problems.
+
+**How to benefit from it**
+
+- **Use it at the last step, not the first.** Find names with Candidates and Best setups, read each Stock page, then bring the finalists here. The page decides between good options; it does not find them.
+- **Read the crosses before the winner.** A column with a red Risk plan or a red Trend is out whatever the rest says — that is why the ranking puts "no failing pillar" first.
+- **Let reward-to-risk break ties.** Two SETUPs at 1.5R and 3.0R are not equal; the second is worth twice as much per unit of risk.
+- **Watch `Extension` and `Heat after trade`.** The chart winner can still be the wrong buy if it is 3 ATR above its average or would push open risk over 6%.
+- **For holdings, compare the `Sell check` row.** When you must free cash, the EXIT beats the REDUCE beats the HOLD — and the exit levels tell you where.
+- **Common mistake:** comparing five or six names by running it twice and mixing the results. Cap it at four; if you have more, the Candidates ranking already ordered them.
 
 ---
 

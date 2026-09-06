@@ -332,7 +332,17 @@
       if (!open.length) {
         openBox.appendChild(PG.mk('div', { class: 'pg-muted', style: 'padding:8px 0' },
           ['No open positions. Record what you hold in "New position" below — symbol, shares and your fill price are enough.']));
-      } else openBox.appendChild(PG.table(open, {
+      } else {
+        var cmpBar = PG.mk('div', { style: 'display:flex;justify-content:flex-end;margin-bottom:8px' });
+        var cmpBtn = PG.mk('button', { type: 'button', class: 'pg-btn secondary small', title: 'Which position to trim first? Open up to four holdings side by side on the Compare page' }, ['Compare holdings']);
+        cmpBtn.addEventListener('click', function () {
+          var syms = []; open.forEach(function (r) { if (r.symbol && syms.indexOf(r.symbol) < 0) syms.push(r.symbol); });
+          if (syms.length < 2) { PG.notify('Need at least two holdings to compare', 'error'); return; }
+          window.location.href = '/compare.html?symbols=' + encodeURIComponent(syms.slice(0, 4).join(','));
+        });
+        cmpBar.appendChild(cmpBtn); openBox.appendChild(cmpBar);
+      }
+      if (open.length) openBox.appendChild(PG.table(open, {
         onRow: PG.openStock,
         columns: [
           { key: 'symbol', label: 'Symbol', numeric: false, render: function (r) {
@@ -899,6 +909,7 @@
   function init() {
     PG.boot('portfolio');
     $('posForm').addEventListener('submit', submitPosition);
+    if (window.attachAutocomplete) attachAutocomplete($('pSymbol'));   // picking a name fires 'change' → plan defaults
     $('pSymbol').addEventListener('change', fillPlanDefaults);
     $('pEntry').addEventListener('change', fillPlanDefaults);
     AUTO_FIELDS.forEach(function (id) { $(id).addEventListener('input', function () { markManual(id); }); });

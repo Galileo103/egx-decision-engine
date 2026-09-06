@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compare — EGX Decision Engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+<link rel="stylesheet" href="/assets/pg.css">
+<style>
+  .cmp-grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .cmp-grid th, .cmp-grid td { padding: 8px 10px; border-bottom: 1px solid var(--line, #26313A); vertical-align: top; }
+  .cmp-grid th.rowhead { text-align: left; color: var(--muted, #8B958F); font-weight: 600; white-space: nowrap; width: 170px; }
+  .cmp-grid th.sym { text-align: left; font-size: 15px; font-weight: 700; }
+  .cmp-grid th.sym a { color: inherit; text-decoration: none; }
+  .cmp-grid td.winner, .cmp-grid th.winner { background: rgba(47, 191, 160, 0.07); box-shadow: inset 2px 0 0 var(--accent, #2FBFA0); }
+  .cmp-pillars { display: flex; gap: 4px; flex-wrap: wrap; }
+  .cmp-chip { display: inline-block; font-size: 10.5px; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--line, #26313A); color: var(--muted, #8B958F); }
+  .cmp-chip.pass { color: var(--up, #34C77B); border-color: rgba(52,199,123,.4); }
+  .cmp-chip.warn { color: var(--warn, #D2A44C); border-color: rgba(210,164,76,.4); }
+  .cmp-chip.fail { color: var(--down, #E5534B); border-color: rgba(229,83,75,.4); }
+  .cmp-num { font-family: var(--font-mono, monospace); font-variant-numeric: tabular-nums; }
+  .cmp-sub { color: var(--muted, #8B958F); font-size: 11.5px; margin-top: 2px; }
+  .cmp-head { font-size: 13.5px; line-height: 1.5; margin: 8px 0 12px; }
+  .cmp-rank { display: inline-block; min-width: 20px; text-align: center; border-radius: 10px; font-size: 11px; padding: 1px 6px; background: var(--panel2, #1C252B); color: var(--muted, #8B958F); margin-left: 6px; }
+  .cmp-rank.first { background: var(--accent, #2FBFA0); color: #0b1114; }
+</style>
+</head>
+<body>
+<div class="pg-layout">
+  <aside id="sidebar"></aside>
+  <div class="pg-main">
+    <header id="topbar"></header>
+    <main class="pg-content">
+      <section class="pg-panel" style="margin-bottom:14px">
+        <h2>Compare — which one gets the money?</h2>
+        <div class="pg-muted" style="font-size:12.5px;margin-bottom:10px">Two to four symbols, side by side: the buy checklist, the levels-based risk plan, today's measured evidence, relative strength, liquidity, extension, portfolio fit — and, for names you hold, the sell checklist. The ranking is rule-based and explained in words, not a blended score.</div>
+        <form class="pg-form" id="cmpForm">
+          <label class="pg-field">Symbol 1 <input id="s1" placeholder="e.g. GSSC" autocomplete="off"></label>
+          <label class="pg-field">Symbol 2 <input id="s2" placeholder="e.g. COMI" autocomplete="off"></label>
+          <label class="pg-field">Symbol 3 <input id="s3" placeholder="optional" autocomplete="off"></label>
+          <label class="pg-field">Symbol 4 <input id="s4" placeholder="optional" autocomplete="off"></label>
+          <button type="submit" class="pg-btn" id="cmpBtn">Compare</button>
+        </form>
+      </section>
+      <section class="pg-panel" id="resultPanel">
+        <div id="cmpBox"><div class="pg-muted" style="font-size:13px">Enter symbols above, or arrive here from <b>Compare top 3</b> on the Screener's Candidates tab or <b>Compare holdings</b> on the Portfolio page.</div></div>
+      </section>
+    </main>
+    <footer class="pg-footer">Analysis tooling — not financial advice. Data delayed ~15 min.</footer>
+  </div>
+</div>
+
+<script src="/assets/api.js"></script>
+<script src="/assets/ui.js"></script>
+<script src="/assets/pg.js"></script>
+<script>
+'use strict';
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  if (window.renderSidebar) renderSidebar('compare');
+  if (window.renderTopbar) renderTopbar('Compare');
+  if (window.renderMobileNav) renderMobileNav('compare');
+  if (PG.fallbackSidebar) PG.fallbackSidebar('compare');
+
+  var PILLAR_SHORT = { trend: 'Trend', support_resistance: 'S/R', volume: 'Vol', price_action: 'PA', patterns: 'Pat', risk: 'Risk' };
+  var SELL_PILLAR = { thesis: 'Thesis', weekly: 'Weekly', relative_strength: 'RS', distribution: 'Distr', bearish_events: 'Bear', exit_plan: 'Exit' };
+  var ICON = { pass: '✓', warn: '⚠', fail: '✗' };
+  var VERDICT_CLASS = { setup: 'up', watch: 'warn', no_setup: 'down', hold: 'up', reduce: 'warn', exit: 'down' };
+  var EDGE_CLASS = { edge: 'up', marginal: 'warn', negative: 'down', too_few: 'neutral' };
+
+  function num(v, d) { return (v === null || v === undefined || isNaN(Number(v))) ? '—' : PG.num(Number(v), d); }
+  function signed(v, d, suffix) {
+    if (v === null || v === undefined || isNaN(Number(v))) return PG.mk('span', { class: 'pg-muted' }, ['—']);
+    var n = Number(v);
+    return PG.mk('span', { class: 'cmp-num ' + (n > 0 ? 'up' : n < 0 ? 'down' : '') }, [(n > 0 ? '+' : '') + PG.num(n, d) + (suffix || '')]);
+  }
+  function chips(map, labels, prefixTitle) {
+    var wrap = PG.mk('div', { class: 'cmp-pillars' });
+    Object.keys(labels).forEach(function (k) {
+      var st = (map || {})[k]; if (!st) return;
+      wrap.appendChild(PG.mk('span', { class: 'cmp-chip ' + st, title: (prefixTitle || '') + labels[k] + ': ' + st }, [(ICON[st] || '?') + ' ' + labels[k]]));
+    });
+    return wrap;
+  }
+
+  function render(data) {
+    var box = $('cmpBox');
+    box.innerHTML = '';
+    if (!data || data.error) { PG.errBox(box, 'Compare: ' + ((data && data.error) || 'no response')); return; }
+    var cols = data.columns || [];
+    var rankOf = {}; (data.ranking || []).forEach(function (s, i) { rankOf[s] = i + 1; });
+    box.appendChild(PG.mk('div', { class: 'cmp-head' }, [data.headline || '']));
+    if (data.truncated && data.truncated.length) box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:12px;margin-bottom:8px' }, ['Only four at a time — ignored: ' + data.truncated.join(', ')]));
+
+    var table = PG.mk('table', { class: 'cmp-grid' });
+    var thead = PG.mk('thead'); var hr = PG.mk('tr'); hr.appendChild(PG.mk('th', { class: 'rowhead' }, ['']));
+    cols.forEach(function (c) {
+      var th = PG.mk('th', { class: 'sym' + (c.symbol === data.winner ? ' winner' : '') });
+      th.appendChild(PG.mk('a', { href: '/stock.html?symbol=' + encodeURIComponent(c.symbol) }, [c.symbol]));
+      var r = rankOf[c.symbol]; if (r) th.appendChild(PG.mk('span', { class: 'cmp-rank' + (r === 1 ? ' first' : '') }, ['#' + r]));
+      if (c.held) th.appendChild(PG.mk('div', { class: 'cmp-sub' }, ['held']));
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr); table.appendChild(thead);
+    var tbody = PG.mk('tbody');
+
+    function row(label, cellFn, title) {
+      var tr = PG.mk('tr');
+      tr.appendChild(PG.mk('th', { class: 'rowhead', title: title || '' }, [label]));
+      cols.forEach(function (c) {
+        var td = PG.mk('td', { class: c.symbol === data.winner ? 'winner' : '' });
+        if (c.error) { td.appendChild(PG.mk('span', { class: 'pg-muted' }, [label === 'Verdict' ? 'no data: ' + c.error : '—'])); }
+        else { var node = cellFn(c); if (node !== null && node !== undefined) td.appendChild(typeof node === 'string' ? document.createTextNode(node) : node); }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    }
+
+    row('Verdict', function (c) {
+      var w = PG.mk('div');
+      w.appendChild(PG.mk('span', { class: 'badge ' + (VERDICT_CLASS[c.verdict] || 'neutral') }, [String(c.verdict || '').replace('_', ' ').toUpperCase() + ' ' + (c.score !== undefined ? c.score + '/6' : '')]));
+      w.appendChild(PG.mk('div', { class: 'cmp-sub' }, [c.headline || '']));
+      return w;
+    }, 'The buy checklist verdict for this stock');
+    row('Six pillars', function (c) { return chips(c.pillars, PILLAR_SHORT); }, 'Trend, support/resistance, volume, price action, patterns, risk plan');
+    row('Price', function (c) { return PG.mk('span', { class: 'cmp-num' }, [num(c.price)]); });
+    row('Risk plan', function (c) {
+      var rp = c.risk_plan || {}; var w = PG.mk('div');
+      if (rp.entry === undefined || rp.entry === null) return PG.mk('span', { class: 'pg-muted' }, ['no plan']);
+      w.appendChild(PG.mk('div', { class: 'cmp-num' }, ['entry ' + num(rp.entry) + ' · stop ' + num(rp.stop) + ' · target ' + num(rp.target)]));
+      var rr = rp.rr;
+      w.appendChild(PG.mk('div', {}, [PG.mk('span', { class: 'badge ' + (rr === null || rr === undefined ? 'neutral' : rr >= 2 ? 'up' : rr >= 1 ? 'warn' : 'down') }, [(rr === null || rr === undefined ? '—' : PG.num(rr, 1) + 'R')]),
+        PG.mk('span', { class: 'cmp-sub', style: 'margin-left:6px' }, ['stop ' + num(rp.stop_pct, 1) + '% away'])]));
+      return w;
+    }, 'Levels-based plan: stop under the nearest tested support, first target at the nearest resistance');
+    row('Shares at your risk', function (c) {
+      var rp = c.risk_plan || {};
+      if (!rp.shares_at_risk_pct) return PG.mk('span', { class: 'pg-muted' }, ['—']);
+      return PG.mk('span', { class: 'cmp-num' }, [PG.num(rp.shares_at_risk_pct, 0) + ' sh (~' + PG.num(rp.shares_at_risk_pct * (rp.entry || 0), 0) + ' EGP)']);
+    }, 'Position size at ' + (data.risk_pct || 1) + '% of the account');
+    row('Evidence today', function (c) {
+      var w = PG.mk('div');
+      if (!c.signals || !c.signals.length) { w.appendChild(PG.mk('span', { class: 'pg-muted' }, ['no journaled signal today'])); return w; }
+      c.signals.forEach(function (s) {
+        var e = s.edge || {};
+        w.appendChild(PG.mk('span', { class: 'pg-badge', style: 'margin:0 4px 4px 0', title: 'weight ' + PG.num(s.weight) + (e.verdict ? ' · ' + e.verdict.replace('_', ' ') + (e.n ? ' (n=' + e.n + ')' : '') : ' · no measured record') }, [s.name.replace(/_/g, ' ') + (e.verdict ? ' · ' + e.verdict.replace('_', ' ') : '')]));
+      });
+      w.appendChild(PG.mk('div', { class: 'cmp-sub' }, ['evidence weight ' + PG.num(c.evidence_weight)]));
+      return w;
+    }, 'Journaled scanner / rule / pattern hits with their Scorecard weight and Proven-edge verdict');
+    row('Strongest measured edge', function (c) {
+      var s = c.strongest_signal; if (!s) return PG.mk('span', { class: 'pg-muted' }, ['none with a proven edge']);
+      var e = s.edge || {};
+      return PG.mk('span', {}, [s.name.replace(/_/g, ' ') + ' — ' + (e.excess_vs_random !== undefined && e.excess_vs_random !== null ? (e.excess_vs_random > 0 ? '+' : '') + PG.num(e.excess_vs_random, 2) + ' pts vs random' : '') + (e.n ? ', n=' + e.n : '')]);
+    });
+    row('Rel. strength 1m / 3m', function (c) {
+      var rs = c.rs || {}; var w = PG.mk('div');
+      w.appendChild(signed(rs.excess_1m, 1, ' pts')); w.appendChild(document.createTextNode(' / ')); w.appendChild(signed(rs.excess_3m, 1, ' pts'));
+      w.appendChild(PG.mk('div', { class: 'cmp-sub' }, [rs.pct_from_52w_high !== undefined && rs.pct_from_52w_high !== null ? PG.num(rs.pct_from_52w_high, 1) + '% from 52w high' + (rs.new_high ? ' · new high' : '') : '']));
+      return w;
+    }, 'Return minus EGX30 over 1 and 3 months, in percentage points');
+    row('Liquidity', function (c) {
+      var v = (c.rs || {}).median_value_20d; var ok = (c.risk_plan || {}).liquid;
+      return PG.mk('span', { class: 'cmp-num ' + (ok === false ? 'down' : '') }, [v ? PG.num(v / 1e6, 1) + 'M EGP/day' : '—', ok === false ? ' · below floor' : '']);
+    }, '20-day median traded value');
+    row('Extension', function (c) {
+      var e = c.extension_atr; if (e === null || e === undefined) return PG.mk('span', { class: 'pg-muted' }, ['—']);
+      return PG.mk('span', { class: 'cmp-num ' + (e > 3 ? 'down' : e > 2 ? 'warn' : '') }, [(e > 0 ? '+' : '') + PG.num(e, 1) + ' ATR above 20-day' + (e > 3 ? ' · extended' : e > 2 ? ' · stretched' : '')]);
+    }, 'Distance from the 20-day average in ATR; above 3 the entry is usually late');
+    row('Sector / held there', function (c) { return PG.mk('span', {}, [(c.sector || 'unknown') + (c.held_in_sector ? ' · ' + c.held_in_sector + ' held' : '')]); });
+    row('Heat after trade', function (c) {
+      if (c.heat_after_pct === null || c.heat_after_pct === undefined) return PG.mk('span', { class: 'pg-muted' }, ['—']);
+      var over = c.heat_after_pct > (c.heat_cap_pct || 6);
+      return PG.mk('span', { class: 'cmp-num ' + (over ? 'down' : '') }, [PG.num(c.heat_after_pct, 1) + '% of account' + (over ? ' · over the ' + PG.num(c.heat_cap_pct || 6, 0) + '% cap' : '')]);
+    }, 'Open risk across all positions if this trade is added at your risk %');
+    if (cols.some(function (c) { return c.held; })) {
+      row('Sell check (held)', function (c) {
+        if (!c.held) return PG.mk('span', { class: 'pg-muted' }, ['not held']);
+        var sc = c.sell; if (!sc) return PG.mk('span', { class: 'pg-muted' }, ['unavailable']);
+        var w = PG.mk('div');
+        w.appendChild(PG.mk('span', { class: 'badge ' + (VERDICT_CLASS[sc.verdict] || 'neutral') }, [String(sc.verdict || '').toUpperCase()]));
+        var dl = sc.decision_levels || {}; var bits = [];
+        if (dl.exit_below !== null && dl.exit_below !== undefined) bits.push('exit < ' + PG.num(dl.exit_below));
+        if (dl.reduce_at !== null && dl.reduce_at !== undefined) bits.push('reduce @ ' + PG.num(dl.reduce_at));
+        if (dl.trail_stop_to !== null && dl.trail_stop_to !== undefined) bits.push('stop → ' + PG.num(dl.trail_stop_to));
+        w.appendChild(PG.mk('div', { class: 'cmp-sub' }, [bits.join(' · ')]));
+        w.appendChild(chips(sc.pillars, SELL_PILLAR, 'Sell: '));
+        return w;
+      }, 'The six-pillar sell checklist for positions you hold');
+    }
+    table.appendChild(tbody);
+    var wrap = PG.mk('div', { style: 'overflow-x:auto' }); wrap.appendChild(table); box.appendChild(wrap);
+    if (data.basis) box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:11.5px;margin-top:10px' }, [data.basis]));
+    box.appendChild(PG.detailsBlock('Full compare payload', data));
+  }
+
+  async function run(syms) {
+    var box = $('cmpBox');
+    PG.loading(box, 'Comparing ' + syms.join(', ') + '…');
+    $('cmpBtn').disabled = true;
+    try {
+      var data = await PG.api('get', '/api/compare?symbols=' + encodeURIComponent(syms.join(',')));
+      render(data);
+      try { history.replaceState(null, '', '/compare.html?symbols=' + encodeURIComponent(syms.join(','))); } catch (e) { /* ignore */ }
+    } catch (e) {
+      PG.errBox(box, 'Compare failed: ' + (e && e.message ? e.message : e));
+    } finally { $('cmpBtn').disabled = false; }
+  }
+
+  function formSymbols() {
+    return ['s1', 's2', 's3', 's4'].map(function (id) { return $(id).value.trim().toUpperCase().replace(/^EGX:/, ''); }).filter(Boolean);
+  }
+  $('cmpForm').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var syms = formSymbols();
+    if (syms.length < 2) { PG.notify('Enter at least two symbols', 'error'); return; }
+    run(syms);
+  });
+  ['s1', 's2', 's3', 's4'].forEach(function (id) { if (window.attachAutocomplete) attachAutocomplete($(id)); });
+  var q = new URLSearchParams(window.location.search).get('symbols');
+  if (q) {
+    var syms = q.split(/[,;\s]+/).map(function (s) { return s.trim().toUpperCase().replace(/^EGX:/, ''); }).filter(Boolean).slice(0, 4);
+    syms.forEach(function (s, i) { $('s' + (i + 1)).value = s; });
+    if (syms.length >= 2) run(syms);
+  }
+})();
+</script>
+</body>
+</html>

@@ -183,6 +183,7 @@
   }
 
   async function loadSymbolList() {
+    ['fSymbol', 'rSymbol'].forEach(function (id) { var i = $(id); if (i && window.attachAutocomplete) attachAutocomplete(i); });
     var dl = $('symlist');
     if (!dl) return;
     // Prefer the full ticker catalog (every EGX symbol + company name); fall

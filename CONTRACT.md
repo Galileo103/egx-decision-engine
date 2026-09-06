@@ -242,6 +242,16 @@ def start(...) / status()       # background job; weekly_maintenance also calls 
 beat_rate/avg_excess read "in the signal's favour"; `baseline()` reads the stored random-entry yardstick (default 50%);
 weight = 1 + 2 × (right-way rate − baseline rate), clamped [0.5, 1.5]; horizons carry `se_excess`, `beat_vs_random_pp`, `excess_vs_random`.
 
+### app/services/compare.py — side-by-side comparison (2026-09-05)
+```python
+MAX_SYMBOLS = 4
+def compare(symbols) -> dict   # {symbols, truncated, columns[{symbol, verdict, score, pillars, fails, fatal_fail, risk_plan,
+                               #   extension_atr, rs{...}, signals[{name,weight,edge}], evidence_weight, strongest_signal, sector,
+                               #   held_in_sector, heat_after_pct, held, sell, position, rank}], ranking, winner, headline, open_heat_pct, basis}
+# rank key: (has fails, verdict rank, -rr, -evidence_weight, -excess_1m); Trend/Risk are fatal pillars
+```
+Route: GET /api/compare?symbols=A,B,C (routes_compare). Page: web/compare.html (sidebar "Compare"; Screener `Compare top 3`, Portfolio `Compare holdings`).
+
 ### app/services/rule_scanner.py — proven-rules scanner (2026-09-05)
 ```python
 RULES = ('range_breakout','squeeze_breakout','momentum_3','pullback_trend')   # rules_backtest._SIGNALS on the LAST bar

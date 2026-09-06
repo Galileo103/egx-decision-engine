@@ -317,6 +317,7 @@
     { href: "screener.html", label: "Screener", ico: "⌗", key: "screener" },
     { href: "backtest.html", label: "Backtest", ico: "↻", key: "backtest" },
     { href: "portfolio.html", label: "Portfolio", ico: "☷", key: "portfolio" },
+    { href: "compare.html", label: "Compare", ico: "⇄", key: "compare" },
   ];
 
   function renderSidebar(active) {
@@ -507,28 +508,51 @@
   }
 
   /**
-   * Top-bar search: a real autocomplete (keyboard-navigable dropdown showing
-   * company name, sector and index badge) rather than a bare datalist.
+   * Symbol autocomplete, reusable. Wraps ``input`` in an `.ac-host`, adds a
+   * keyboard-navigable dropdown (ticker, company name, index badge; sector as
+   * tooltip) fed by the cached catalog, and either navigates to the Stock page
+   * (``opts.navigate``, the top-bar search) or fills the field and fires
+   * ``input``/``change`` events plus ``opts.onPick`` (form fields: Compare,
+   * New position, Backtest).
    */
-  function buildSearchBox() {
+  function attachAutocomplete(input, opts) {
+    opts = opts || {};
+    if (!input || input.dataset.acAttached) return input;
+    input.dataset.acAttached = "1";
+    input.setAttribute("autocomplete", "off");
+    input.setAttribute("spellcheck", "false");
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("list");                 // a native datalist would double the menu
+
+    var host = el("div", { class: "ac-host" });
+    if (input.parentNode) input.parentNode.insertBefore(host, input);
+    host.appendChild(input);
+    var menu = el("div", { class: "ac-menu", role: "listbox" });
+    host.appendChild(menu);
+
     var rows = [];
     var open = false;
     var active = -1;
     var items = [];
 
-    var input = el("input", {
-      type: "text", placeholder: "Search symbol or company…",
-      autocomplete: "off", spellcheck: "false", "aria-label": "Search symbol",
-      role: "combobox", "aria-autocomplete": "list", "aria-expanded": "false",
-    });
-    var menu = el("div", { class: "ac-menu", role: "listbox" });
-    var box = el("div", { class: "search-box" }, [
-      el("span", { class: "search-ico", text: "⌕" }), input, menu,
-    ]);
-
-    function go(symbol) {
+    function pick(symbol) {
       var v = String(symbol || "").trim().toUpperCase().replace(/^EGX:/, "");
-      if (v) window.location.href = "stock.html?symbol=" + encodeURIComponent(v);
+      if (!v) return;
+      if (opts.navigate) {
+        window.location.href = "stock.html?symbol=" + encodeURIComponent(v);
+        return;
+      }
+      input.value = v;
+      try {
+        // Fire the events first (they re-run refresh), then close so the menu
+        // does not re-open showing the one symbol that was just picked.
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      } catch (e) { /* very old browsers */ }
+      close();
+      if (typeof opts.onPick === "function") opts.onPick(v);
     }
 
     function close() {
@@ -562,17 +586,15 @@
         return;
       }
       list.forEach(function (row) {
-        var meta = [];
-        if (row.sector) meta.push(row.sector);
         var node = el("div", { class: "ac-item", role: "option" }, [
           el("span", { class: "ac-sym", text: row.symbol }),
           el("span", { class: "ac-name", text: row.name || "" }),
           row.index ? el("span", { class: "ac-badge", text: row.index }) : null,
         ].filter(Boolean));
-        if (meta.length) node.title = meta.join(" · ");
+        if (row.sector) node.title = row.sector;
         node.addEventListener("mousedown", function (ev) {
           ev.preventDefault();          // keep focus so blur doesn't beat the click
-          go(row.symbol);
+          pick(row.symbol);
         });
         node.addEventListener("mouseenter", function () {
           highlight(items.findIndex(function (it) { return it.el === node; }));
@@ -589,13 +611,13 @@
     function refresh() {
       var q = input.value.trim();
       if (!q) { close(); return; }
-      render(matchSymbols(rows, q, 10));
+      if (!rows.length) return;          // catalog still loading: nothing to show yet
+      render(matchSymbols(rows, q, opts.limit || 10));
     }
 
     input.addEventListener("input", refresh);
     input.addEventListener("focus", function () { if (input.value.trim()) refresh(); });
     input.addEventListener("blur", function () { setTimeout(close, 120); });
-
     input.addEventListener("keydown", function (ev) {
       if (ev.key === "ArrowDown") {
         ev.preventDefault();
@@ -604,13 +626,12 @@
         ev.preventDefault();
         if (open) highlight(active - 1);
       } else if (ev.key === "Enter") {
-        ev.preventDefault();
-        // A highlighted suggestion wins; otherwise honour exactly what was typed.
-        if (open && active >= 0 && items[active]) go(items[active].symbol);
-        else go(input.value);
+        if (open && active >= 0 && items[active]) { ev.preventDefault(); pick(items[active].symbol); }
+        else if (opts.navigate) { ev.preventDefault(); pick(input.value); }
+        else if (open && items.length) { ev.preventDefault(); pick(items[0].symbol); }
+        // menu closed on a form field: let Enter submit the form as usual
       } else if (ev.key === "Escape") {
-        close();
-        input.blur();
+        if (open) { ev.preventDefault(); close(); } else if (opts.navigate) input.blur();
       }
     });
 
@@ -618,7 +639,18 @@
       rows = list || [];
       if (rows.length && document.activeElement === input && input.value.trim()) refresh();
     });
+    return input;
+  }
 
+  /**
+   * Top-bar search: the shared autocomplete in navigate mode.
+   */
+  function buildSearchBox() {
+    var input = el("input", {
+      type: "text", placeholder: "Search symbol or company…", "aria-label": "Search symbol",
+    });
+    var box = el("div", { class: "search-box" }, [el("span", { class: "search-ico", text: "⌕" }), input]);
+    attachAutocomplete(input, { navigate: true });
     return box;
   }
 
@@ -667,6 +699,7 @@
   window.renderFooter = renderFooter;
   window.renderMobileNav = renderMobileNav;
   window.safeUrl = safeUrl;
+  window.attachAutocomplete = attachAutocomplete;
 
   window.UI = {
     el: el, clear: clear, toast: toast,
@@ -678,7 +711,7 @@
     renderObject: renderObject, renderValue: renderValue,
     skeleton: skeleton, loadingPill: loadingPill, errorBox: errorBox, load: load,
     renderSidebar: renderSidebar, renderTopbar: renderTopbar, renderFooter: renderFooter,
-    loadCatalog: loadCatalog, matchSymbols: matchSymbols,
+    loadCatalog: loadCatalog, matchSymbols: matchSymbols, attachAutocomplete: attachAutocomplete,
     KEYS: { PRICE: PRICE_KEYS, CHANGE: CHANGE_KEYS, VOLUME: VOLUME_KEYS, SYMBOL: SYMBOL_KEYS, SIGNAL: SIGNAL_KEYS },
   };
 })();

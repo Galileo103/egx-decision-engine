@@ -193,6 +193,9 @@ a:hover { text-decoration: underline; }
 
 .search-box input { width: 300px; }
 
+.ac-host { position: relative; display: block; }
+.search-box .ac-host { display: inline-block; }
+.pg-field .ac-host input { width: 100%; box-sizing: border-box; }
 .ac-menu {
   display: none;
   position: absolute;

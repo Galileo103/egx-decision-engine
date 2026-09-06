@@ -225,6 +225,13 @@
       var rulesBtn = PG.mk('button', { type: 'button', class: 'pg-btn secondary', title: "Run the app's own four candle rules on the last bar of every EGX stock (Yahoo, no TradingView). A few minutes on a cold cache; runs in the background." }, ['Scan proven rules']);
       rulesBtn.addEventListener('click', function () { startRuleScan(rulesBtn); });
       head.appendChild(rulesBtn);
+      var cmp = PG.mk('button', { type: 'button', class: 'pg-btn', title: 'Open the top three candidates side by side on the Compare page' }, ['Compare top 3']);
+      cmp.addEventListener('click', function () {
+        var top = rows.slice(0, 3).map(function (r) { return r.symbol; }).filter(Boolean);
+        if (top.length < 2) { PG.notify('Need at least two candidates to compare', 'error'); return; }
+        window.location.href = '/compare.html?symbols=' + encodeURIComponent(top.join(','));
+      });
+      head.appendChild(cmp);
       box.appendChild(head);
       var rulesLine = PG.mk('div', { class: 'pg-muted', id: 'rulesLine', style: 'font-size:12px;margin-bottom:8px' });
       box.appendChild(rulesLine);

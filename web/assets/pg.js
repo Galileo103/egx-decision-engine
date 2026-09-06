@@ -361,7 +361,7 @@ window.PG = (function () {
     var sb = document.getElementById('sidebar');
     if (!sb || sb.childElementCount) return;
     var nav = mk('nav', { class: 'pg-fallback-nav' }, [mk('div', { class: 'pg-brand' }, ['EGX Engine'])]);
-    [['Dashboard','/index.html','dashboard'],['Screener','/screener.html','screener'],['Backtest','/backtest.html','backtest'],['Portfolio','/portfolio.html','portfolio']].forEach(function (l) {
+    [['Dashboard','/index.html','dashboard'],['Screener','/screener.html','screener'],['Backtest','/backtest.html','backtest'],['Portfolio','/portfolio.html','portfolio'],['Compare','/compare.html','compare']].forEach(function (l) {
       nav.appendChild(mk('a', { href: l[1], class: l[2] === active ? 'active' : '' }, [l[0]]));
     });
     sb.appendChild(nav);
