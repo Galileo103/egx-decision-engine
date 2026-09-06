@@ -220,8 +220,50 @@ def info(key: str) -> dict[str, Any]:
     }
 
 
-def enrich(row: dict[str, Any]) -> dict[str, Any]:
-    """Attach catalog metadata to a detection row (in place) and return it."""
+#: How the UI filters detections by their measured verdict (Proven-edge table):
+#:   proven        only patterns with an 'edge' verdict at their reference horizon
+#:   not_negative  everything except patterns that did WORSE than a random entry
+#:   all           the whole catalog (the pre-2026-09-06 behaviour)
+VIEWS: tuple[str, ...] = ("proven", "not_negative", "all")
+DEFAULT_VIEW = "proven"
+#: Verdict for a pattern the edge table has never graded (too few or not journaled).
+UNMEASURED = "unmeasured"
+
+
+def attach_edge(row: dict[str, Any], edges: dict[str, dict] | None) -> dict[str, Any]:
+    """Stamp a detection row with its pattern type's measured verdict.
+
+    ``edges`` is ``edge.pattern_edges()`` (key -> stats); None or a missing key
+    leaves the row 'unmeasured' — never a silent 'edge'. Added keys:
+    ``edge_verdict``, ``edge_horizon``, ``edge_n``, ``edge_metric``,
+    ``edge_hit_rate``, ``proven`` (verdict == 'edge').
+    """
+    e = (edges or {}).get(str(row.get("pattern"))) if edges else None
+    verdict = str((e or {}).get("verdict") or UNMEASURED)
+    if verdict == "too_few":
+        verdict = UNMEASURED
+    row["edge_verdict"] = verdict
+    row["edge_horizon"] = (e or {}).get("horizon")
+    row["edge_n"] = (e or {}).get("n")
+    row["edge_metric"] = (e or {}).get("edge_metric")
+    row["edge_hit_rate"] = (e or {}).get("hit_rate")
+    row["proven"] = verdict == "edge"
+    return row
+
+
+def passes_view(row: dict[str, Any], view: str | None) -> bool:
+    """Does a stamped row belong in ``view``? Unknown views behave like 'all'."""
+    v = str(row.get("edge_verdict") or UNMEASURED)
+    if view == "proven":
+        return v == "edge"
+    if view == "not_negative":
+        return v != "negative"
+    return True
+
+
+def enrich(row: dict[str, Any], edges: dict[str, dict] | None = None) -> dict[str, Any]:
+    """Attach catalog metadata (and, when ``edges`` is given, the measured verdict)
+    to a detection row in place and return it."""
     meta = info(str(row.get("pattern")))
     row.setdefault("label", meta["label"])
     row["category"] = meta["category"]
@@ -233,6 +275,8 @@ def enrich(row: dict[str, Any]) -> dict[str, Any]:
     row["reliability"] = meta["reliability"]
     row["frequency"] = meta["frequency"]
     row["note"] = meta["note"]
+    if edges is not None:
+        attach_edge(row, edges)
     return row
 
 

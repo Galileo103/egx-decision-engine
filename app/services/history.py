@@ -118,6 +118,32 @@ def _parse_chart(payload: dict[str, Any], symbol: str, interval: str) -> dict:
     out: dict[str, Any] = {"symbol": symbol, "candles": candles}
     if rejected:
         out["rejected_candles"] = rejected
+    events = _parse_events(result.get("events"), interval)
+    if events:
+        out["events"] = events
+    return out
+
+
+def _parse_events(events: Any, interval: str) -> list[dict]:
+    """Yahoo's ``events`` block -> [{type: dividend|split, date, amount|ratio}] (sorted)."""
+    out: list[dict] = []
+    if not isinstance(events, dict):
+        return out
+    for ts, e in (events.get("dividends") or {}).items():
+        try:
+            when = _candle_time(int((e or {}).get("date") or ts), interval)
+            out.append({"type": "dividend", "date": str(when)[:10], "amount": float((e or {}).get("amount"))})
+        except (TypeError, ValueError):
+            continue
+    for ts, e in (events.get("splits") or {}).items():
+        try:
+            when = _candle_time(int((e or {}).get("date") or ts), interval)
+            num, den = float((e or {}).get("numerator") or 0), float((e or {}).get("denominator") or 0)
+            out.append({"type": "split", "date": str(when)[:10], "ratio": round(num / den, 4) if den else None,
+                        "note": str((e or {}).get("splitRatio") or "")})
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
+    out.sort(key=lambda x: x["date"])
     return out
 
 
@@ -191,7 +217,9 @@ def get_history(symbol: str, range_: str = "1y", interval: str = "1d") -> dict:
             )
 
         url = _BASE_URL.format(symbol=yahoo_symbol)
-        params = {"interval": interval, "range": range_}
+        # events=div,splits: Yahoo returns the dividend / split calendar with the
+        # bars at no extra request — the only corporate-actions feed we have.
+        params = {"interval": interval, "range": range_, "events": "div,splits"}
         last_error: dict = {"error": f"no response for {yahoo_symbol}"}
 
         for attempt in range(_RETRIES):

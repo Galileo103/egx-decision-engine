@@ -38,19 +38,106 @@ def _round_trip_fees(entry: float, exit_price: float, qty: float) -> float:
 # ── sizing ───────────────────────────────────────────────────────────────────
 
 
+# ── plan quality (TA roadmap Task 3) ─────────────────────────────────────────
+
+
+def atr14(symbol: str) -> Optional[float]:
+    """14-day ATR from the shared daily-candle cache (Yahoo + session graft).
+
+    Used by the plan-quality gate. The candles are normally already cached by
+    the post-close sweep, so this is a dictionary read; when they are not, one
+    Yahoo fetch is the price of not letting a noise-level target through.
+    Returns None when unavailable — the ATR test is then skipped, never faked.
+    """
+    try:
+        from app.services import guardian, leaders
+
+        sym = str(symbol or "").upper().strip().split(":")[-1]
+        candles = leaders.daily_candles(sym)
+        if len(candles) < 20:
+            return None
+        return guardian._atr(candles[-80:])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("atr14(%s) failed: %s", symbol, exc)
+        return None
+
+
+def plan_quality(entry: float, risk_stop: Optional[float], target1: Optional[float],
+                 target2: Optional[float], atr: Optional[float] = None,
+                 min_rr: Optional[float] = None, min_atr: Optional[float] = None) -> dict:
+    """Pure: does a recorded plan deserve to be called a plan?
+
+    Two tests on the nearest target (target 1, or target 2 when there is no
+    target 1): reward-to-risk against the INITIAL risk (entry − risk_stop) must
+    be at least ``min_rr`` (settings.MIN_RR_T1), and the target must sit at
+    least ``min_atr`` ATR14 above entry (settings.MIN_TARGET_ATR) — a target
+    inside one day's normal range is noise the Guardian would celebrate as
+    "target hit". Missing inputs skip the corresponding test rather than fail it.
+
+    Returns {"rr_t1", "rr_t2", "t1_atr", "risk", "atr", "faults": [...], "ok",
+    "checked": bool (a target existed), "min_rr_t1", "min_target_atr"}.
+    """
+    min_rr = float(settings.min_rr_t1 if min_rr is None else min_rr)
+    min_atr = float(settings.min_target_atr if min_atr is None else min_atr)
+    entry = float(entry)
+    t1 = _to_float(target1)
+    t2 = _to_float(target2)
+    near = t1 if t1 is not None else t2
+    near_label = "target 1" if t1 is not None else "target 2"
+    risk = (entry - float(risk_stop)) if (risk_stop is not None and float(risk_stop) < entry) else None
+    rr_t1 = round((t1 - entry) / risk, 2) if (t1 is not None and risk) else None
+    rr_t2 = round((t2 - entry) / risk, 2) if (t2 is not None and risk) else None
+    rr_near = round((near - entry) / risk, 2) if (near is not None and risk) else None
+    t1_atr = round((near - entry) / atr, 2) if (near is not None and atr and atr > 0) else None
+    faults: list[str] = []
+    if near is not None and rr_near is not None and rr_near < min_rr:
+        faults.append(
+            f"reward-to-risk to {near_label} is {rr_near:.2f}R (needs at least {min_rr:g}R): "
+            f"{near_label} {near:.2f} is {near - entry:.2f} above entry {entry:.2f} against "
+            f"{risk:.2f} of risk per share"
+        )
+    if near is not None and t1_atr is not None and t1_atr < min_atr:
+        faults.append(
+            f"{near_label} {near:.2f} sits only {t1_atr:.2f} ATR above entry (14-day ATR {atr:.2f}) — "
+            f"inside one day's normal range, not a profit level (needs at least {min_atr:g} ATR)"
+        )
+    return {
+        "rr_t1": rr_t1, "rr_t2": rr_t2, "t1_atr": t1_atr,
+        "risk": round(risk, 4) if risk is not None else None,
+        "atr": round(atr, 4) if atr else None,
+        "faults": faults, "ok": not faults, "checked": near is not None,
+        "min_rr_t1": min_rr, "min_target_atr": min_atr,
+    }
+
+
+def _blocked_plan(quality: dict, source_hint: str = "") -> dict:
+    return {
+        "error": ("BLOCKED: the recorded plan does not pay for its risk — "
+                  + "; ".join(quality["faults"]) + ". " + source_hint
+                  + "Enter a real target (the nearest tested resistance, or at least "
+                  f"{quality['min_rr_t1']:g}R), leave the target empty, or resubmit with an explicit override."),
+        "requires_override": True,
+        "plan_quality": quality,
+    }
+
+
 def size_position(
     account: float,
     risk_pct: float,
     entry: float,
     stop: float,
     symbol: Optional[str] = None,
+    target1: Optional[float] = None,
+    target2: Optional[float] = None,
 ) -> dict:
     """Fixed-fractional position size for a long trade.
 
     When ``symbol`` is given, the suggested size is checked against the
     stock's 20-day median traded value — on EGX, exit liquidity is the real
     risk, and a position that is a large slice of a day's turnover cannot be
-    stopped out anywhere near the planned level.
+    stopped out anywhere near the planned level. When a target is given the
+    result also carries ``plan_quality`` (reward-to-risk and ATR distance),
+    the same gate the ledger applies when the position is recorded.
 
     Returns {"shares", "risk_amount", "position_cost", "risk_reward_note"}
     or {"error": ...} on invalid input.
@@ -121,12 +208,24 @@ def size_position(
                     "to compute 20-day traded value)."
                 )
 
+        quality: Optional[dict] = None
+        if _to_float(target1) is not None or _to_float(target2) is not None:
+            q = plan_quality(entry, stop, target1, target2, atr14(symbol) if symbol else None)
+            quality = q
+            if q["faults"]:
+                notes.append("PLAN WARNING: " + "; ".join(q["faults"])
+                             + ". The ledger will block this plan unless you override.")
+            elif q["rr_t1"] is not None:
+                notes.append(f"Reward-to-risk to target 1 is {q['rr_t1']:.2f}R"
+                             + (f" ({q['t1_atr']:.1f} ATR away)" if q["t1_atr"] is not None else "") + ".")
+
         return {
             "shares": shares,
             "risk_amount": round(risk_amount, 2),
             "position_cost": position_cost,
             "liquidity_egp": liquidity_egp,
             "position_pct_of_adv": adv_pct,
+            "plan_quality": quality,
             "risk_reward_note": " ".join(notes),
         }
     except Exception as exc:
@@ -421,6 +520,16 @@ def open_position(
                 "R multiples for this trade will show as unavailable. The guardian still "
                 "watches the stop."
             )
+        # Plan-quality gate: a target that does not pay for the risk, or that sits
+        # inside one day's range, is not a plan — the Guardian would call noise a
+        # "target hit" (CLHO 2026-09-06: T1 0.3% above entry vs a 4.4% stop).
+        quality = plan_quality(entry, initial_stop, _to_float(target1), _to_float(target2), atr14(symbol))
+        if quality["faults"]:
+            from_plan = any(a.startswith("target1") or a.startswith("target2") for a in auto_filled)
+            if not allow_override:
+                return _blocked_plan(quality, "(The target came from the stock's own trade plan, which offers "
+                                              "nothing better at this entry.) " if from_plan else "")
+            warnings.append("OVERRIDDEN plan-quality gate: " + "; ".join(quality["faults"]) + ".")
         if account > 0:
             new_risk_pct = new_risk / account * 100.0
             existing_risk = 0.0
@@ -502,6 +611,7 @@ def open_position(
         rows = db.query("SELECT * FROM positions WHERE id = ?", (position_id,))
         result = rows[0] if rows else {"id": position_id, "symbol": symbol, "status": "open"}
         result["plan"] = _parse_plan(result)
+        result["plan_quality"] = quality
         if warnings:
             result["risk_warnings"] = warnings
         if auto_filled:
@@ -755,6 +865,7 @@ def update_position(
     target2: Optional[float] = None,
     note: Optional[str] = None,
     initial_stop: Optional[float] = None,
+    allow_override: bool = False,
 ) -> dict:
     """Adjust the CURRENT stop / targets / note of an open position.
 
@@ -765,7 +876,8 @@ def update_position(
     This is how a guardian TIGHTEN_STOP suggestion is acted on. The stop may
     sit at or above entry (locking in profit); ``initial_stop`` is never
     touched, so R-multiples keep measuring against the risk you took at entry.
-    Passing a field as None leaves it unchanged.
+    Passing a field as None leaves it unchanged. New targets pass the same
+    plan-quality gate as ``open_position`` (``allow_override`` to bypass).
     """
     try:
         rows = db.query("SELECT * FROM positions WHERE id = ?", (position_id,))
@@ -811,6 +923,17 @@ def update_position(
         if ((target1 is not None or target2 is not None) and new_t1 is not None
                 and new_t2 is not None and new_t2 <= new_t1):
             return {"error": f"target2 ({new_t2:.2f}) must be above target1 ({new_t1:.2f})."}
+        quality: Optional[dict] = None
+        if target1 is not None or target2 is not None:
+            # Risk anchor = the stop at entry when known; else the current stop.
+            risk_stop = _to_float(pos.get("initial_stop"))
+            if risk_stop is None:
+                risk_stop = _to_float(initial_stop) if initial_stop is not None else _to_float(pos.get("stop"))
+            quality = plan_quality(entry, risk_stop, new_t1, new_t2, atr14(str(pos.get("symbol") or "")))
+            if quality["faults"]:
+                if not allow_override:
+                    return _blocked_plan(quality)
+                warnings.append("OVERRIDDEN plan-quality gate: " + "; ".join(quality["faults"]) + ".")
         if initial_stop is not None:
             if _to_float(pos.get("initial_stop")) is not None:
                 return {"error": "initial_stop is already recorded and cannot be changed — "
@@ -830,6 +953,8 @@ def update_position(
         db.execute(f"UPDATE positions SET {', '.join(sets)} WHERE id = ?", params)  # noqa: S608
         result = db.query("SELECT * FROM positions WHERE id = ?", (position_id,))[0]
         result["plan"] = _parse_plan(result)
+        if quality is not None:
+            result["plan_quality"] = quality
         if warnings:
             result["risk_warnings"] = warnings
         return result

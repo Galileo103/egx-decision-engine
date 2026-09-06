@@ -39,17 +39,53 @@ def _member_keys(head: dict, rows: list[dict]) -> list[str]:
     return [r["pattern"] for r in rows if r.get("event_id") == eid and r is not head]
 
 
-def checklist(symbol: str, candles: Optional[list[dict]] = None) -> dict:
+def _market_gate(verdict: str, headline: str, regime_state: Optional[str]) -> tuple[str, str, dict]:
+    """Apply the market regime to a stock's verdict.
+
+    The six pillars look at one stock; the tape decides much of what happens
+    next (a random EGX long beats the index only ~44% of the time, mostly in
+    bull tapes). In a bear regime a SETUP becomes WATCH with the reason spelled
+    out — the pillar count is untouched so the card keeps its shape and the
+    reader can see the stock itself still qualifies.
+    """
+    state = regime_state if regime_state in ("bull", "neutral", "bear") else None
+    market: dict[str, Any] = {"state": state, "raw_verdict": verdict, "applied": False}
+    if state is None:
+        market["text"] = "Market regime unknown — verdict rests on the stock alone."
+        return verdict, headline, market
+    if state == "bear":
+        market["text"] = ("Bear tape: EGX30 is below a falling 50-day average or most stocks are below theirs. "
+                          "Breakouts fail more often here; the index, not the chart, sets the odds.")
+        if verdict == "setup":
+            market["applied"] = True
+            return "watch", ("Market against it: the stock qualifies, but the tape is bearish — wait for the "
+                             "index to turn or size it as a probe. " + headline), market
+        return verdict, headline, market
+    if state == "bull":
+        market["text"] = "Bull tape: EGX30 above a rising 50-day average with broad participation — the market helps."
+    else:
+        market["text"] = "Mixed tape: no help from the index either way — the stock's own evidence decides."
+    return verdict, headline, market
+
+
+def checklist(symbol: str, candles: Optional[list[dict]] = None,
+              regime_state: Optional[str] = None) -> dict:
     """Run the six pillars for one symbol. Never raises.
 
     ``candles`` lets the historical replay hand in a past window; live callers
-    leave it None and the latest Yahoo daily candles are used.
+    leave it None and the latest Yahoo daily candles are used. ``regime_state``
+    overrides the market regime (the replay passes the regime of the window's
+    last session, or "unknown"); live callers leave it None and today's stored
+    regime is used.
     """
     try:
         from app.services import leaders, levels, patterns, weekly
         from app.services.rules_backtest import Ind
 
         sym = str(symbol or "").upper().strip().split(":")[-1]
+        # The replay hands in past windows; today's sector ranking would be
+        # look-ahead there, so the sector sentence is live-only.
+        candles_given_for_replay = candles is not None
         if candles is None:
             candles = leaders.daily_candles(sym)
         if len(candles) < 120:
@@ -80,6 +116,17 @@ def checklist(symbol: str, candles: Optional[list[dict]] = None) -> dict:
             out["trend"] = _p("fail", f"Price {price:.2f} below the 50-day average ({sma50:.2f}) and the 20-day is below the 50-day — a downtrend. Buying against it needs a reason.")
         else:
             out["trend"] = _p("warn", f"Mixed: price {price:.2f}, 20-day {sma20:.2f}, 50-day {sma50:.2f}. No clear trend yet." if sma20 and sma50 else "Not enough history for the averages.")
+        # Sector context (stored by the post-close Leaders ranking; instant). A strong
+        # stock in a lagging sector is swimming upstream — say so next to the trend.
+        if candles_given_for_replay is False:
+            try:
+                sctx = leaders.sector_context(sym)
+                sent = leaders.sector_sentence(sctx)
+                if sent:
+                    out["trend"]["text"] += " " + sent
+                    out["trend"]["sector"] = sctx
+            except Exception:  # noqa: BLE001 — context only
+                pass
         wk = weekly.context(candles)
         if "error" not in wk:
             out["trend"]["text"] += " " + wk["text"]
@@ -119,29 +166,51 @@ def checklist(symbol: str, candles: Optional[list[dict]] = None) -> dict:
         if wk_note and "error" not in lv:
             out["support_resistance"]["text"] += wk_note
 
-        # 3. Volume
+        # 3. Volume — the trigger day first (relative volume vs the 20-day MEDIAN),
+        # then the week's tone. On EGX the volume of the breakout session decides
+        # whether the break holds; a week's average smears that one number away.
         v20 = x.vavg[-1] or 0.0
         recent = sum(x.v[-5:]) / 5.0 if v20 else 0.0
         ratio = recent / v20 if v20 else None
         up_vol = sum(x.v[i] for i in range(len(x.c) - 20, len(x.c)) if x.c[i] > x.c[i - 1])
         tot_vol = sum(x.v[-20:]) or 1.0
         up_share = up_vol / tot_vol
+        rvol_today = x.rvol[-1]
+        up_day = len(x.c) > 1 and x.c[-1] > x.c[-2]
+        rv_txt = (f"Today's volume is {rvol_today:.1f}× its 20-day median" if rvol_today is not None
+                  else "Today's relative volume is unknown")
         if ratio is None:
             out["volume"] = _p("warn", "No volume data.")
+        elif rvol_today is not None and rvol_today >= 1.5 and up_day:
+            out["volume"] = _p("pass", f"{rv_txt} on an up day — a real surge behind the move. {up_share * 100:.0f}% of the last 20 sessions' volume traded on up days.")
+        elif rvol_today is not None and rvol_today >= 1.5 and not up_day:
+            out["volume"] = _p("fail", f"{rv_txt} on a DOWN day — heavy selling into the tape. {up_share * 100:.0f}% of recent volume on up days.")
         elif up_share >= 0.55 and ratio >= 1.0:
-            out["volume"] = _p("pass", f"{up_share * 100:.0f}% of the last 20 sessions' volume traded on up days, and this week runs at {ratio:.1f}x the 20-day average — buyers are doing the work.")
+            out["volume"] = _p("pass", f"{up_share * 100:.0f}% of the last 20 sessions' volume traded on up days, and this week runs at {ratio:.1f}x the 20-day average — buyers are doing the work. {rv_txt}.")
         elif up_share <= 0.40 and ratio >= 1.1:
-            out["volume"] = _p("fail", f"Only {up_share * 100:.0f}% of recent volume traded on up days while activity is {ratio:.1f}x normal — heavy selling.")
-        elif ratio < 0.7:
-            out["volume"] = _p("warn", f"Volume this week is {ratio:.1f}x the 20-day average — quiet. Breakouts on quiet volume tend to fail.")
+            out["volume"] = _p("fail", f"Only {up_share * 100:.0f}% of recent volume traded on up days while activity is {ratio:.1f}x normal — heavy selling. {rv_txt}.")
+        elif ratio < 0.7 or (rvol_today is not None and rvol_today < 0.7):
+            out["volume"] = _p("warn", f"{rv_txt}; this week is {ratio:.1f}x the 20-day average — quiet. Breakouts on quiet volume tend to fail.")
         else:
-            out["volume"] = _p("warn", f"{up_share * 100:.0f}% of recent volume on up days, activity {ratio:.1f}x average — no clear message from volume.")
+            out["volume"] = _p("warn", f"{rv_txt}; {up_share * 100:.0f}% of recent volume on up days, activity {ratio:.1f}x average — no clear message from volume.")
+        out["volume"]["rvol"] = rvol_today
+        out["volume"]["up_share"] = round(up_share, 3)
+        out["volume"]["week_ratio"] = round(ratio, 2) if ratio is not None else None
 
         # 4. Price action (events + candlesticks on the last sessions)
         # One event, several names (False Breakout + Bull Trap, HH/HL + BOS…): the
         # scanner clusters them; count and name events, not rows.
+        # A pattern type that did WORSE than a random entry on five years of EGX
+        # history (Proven-edge verdict 'negative') is not evidence either way, so
+        # pillars 4 and 5 ignore it. Trend (pillar 1) keeps the structure rows: they
+        # describe where the swings are, not a bet on what follows.
+        def _usable(r: dict) -> bool:
+            # negative-record types and event-gap triggers are both non-evidence
+            return str(r.get("edge_verdict") or "") != "negative" and not r.get("suspect")
+
         events = [r for r in pats if r["category"] in ("price_action", "candlestick") and r["status"] == "confirmed"
-                  and r.get("event_headline", True) and r.get("timeframe", "1D") == "1D"]  # weekly rows feed Trend
+                  and r.get("event_headline", True) and r.get("timeframe", "1D") == "1D"  # weekly rows feed Trend
+                  and _usable(r)]
         bull = [r for r in events if r["direction"] == "bullish"]
         bear = [r for r in events if r["direction"] == "bearish"]
         red_names = {"bull_trap", "false_breakout", "change_of_character", "failed_retest", "upthrust"}
@@ -168,7 +237,10 @@ def checklist(symbol: str, candles: Optional[list[dict]] = None) -> dict:
             out["price_action"] = _p("warn", "No decisive price-action event on the last sessions." + (f" ({names(bull + bear)})" if bull or bear else ""))
 
         # 5. Patterns (chart shapes)
-        shapes = [r for r in pats if r["category"] in ("reversal", "triangle", "wedge", "channel", "continuation")]
+        shapes = [r for r in pats if r["category"] in ("reversal", "triangle", "wedge", "channel", "continuation")
+                  and _usable(r)]
+        ignored = [r for r in pats if r["category"] in ("reversal", "triangle", "wedge", "channel", "continuation")
+                   and not _usable(r)]
         conf_bull = [r for r in shapes if r["status"] == "confirmed" and r["direction"] == "bullish"]
         conf_bear = [r for r in shapes if r["status"] == "confirmed" and r["direction"] == "bearish"]
         form_bull = [r for r in shapes if r["status"] == "forming" and r["direction"] == "bullish"]
@@ -184,6 +256,10 @@ def checklist(symbol: str, candles: Optional[list[dict]] = None) -> dict:
             out["patterns"] = _p("warn", f"Bearish shape forming: {names(form_bear)} — trigger {form_bear[0]['neckline']:.2f}.")
         else:
             out["patterns"] = _p("warn", "No chart pattern on the daily chart right now (neutral).")
+        if ignored:
+            out["patterns"]["text"] += (f" Ignored {len(ignored)} shape{'s' if len(ignored) != 1 else ''} whose type did "
+                                        f"worse than a random entry on EGX history ({names(ignored)}).")
+            out["patterns"]["ignored_negative"] = [r["pattern"] for r in ignored]
 
         # 6. Risk plan (levels-based, instant): stop under support, target at resistance.
         stop = (near_s["level"] - 0.5 * atr) if near_s else price - 2.0 * atr
@@ -217,6 +293,20 @@ def checklist(symbol: str, candles: Optional[list[dict]] = None) -> dict:
             out["risk"] = _p("warn", risk_txt + ("Under 2R: acceptable only with a strong trend. " if rr < 2 else "") + ("The stop is more than 10% away — one limit-down session could gap through it." if stop_pct > 10 else ""))
         else:
             out["risk"] = _p("pass", risk_txt + "Reward covers the risk twice or more with a stop at a real level.")
+        # An imminent corporate action gaps the price for a non-market reason:
+        # say so where the stop is decided (live only — replays have no calendar).
+        if not candles_given_for_replay:
+            try:
+                from app.services import corporate_actions as CA
+
+                ev = CA.next_for(sym)
+                if ev:
+                    out["risk"]["text"] += " " + CA.warning_text(ev)
+                    out["risk"]["event"] = {k: ev.get(k) for k in ("type", "ex_date", "amount", "ratio", "days_until", "label")}
+                    if out["risk"]["status"] == "pass":
+                        out["risk"]["status"] = "warn"
+            except Exception:  # noqa: BLE001
+                pass
         risk_plan = {"entry": round(price, 4), "stop": round(stop, 4), "target": round(target, 4),
                      "rr": round(rr, 2) if rr is not None else None, "stop_pct": round(stop_pct, 2),
                      "shares_at_risk_pct": shares, "liquid": liq_ok}
@@ -244,14 +334,25 @@ def checklist(symbol: str, candles: Optional[list[dict]] = None) -> dict:
             verdict = "no_setup"
             headline = f"Nothing to act on: only {score} of 6 pillars in favour."
         missing = [LABELS[k] for k in PILLARS if out[k]["status"] != "pass"]
+        # Market regime last: it can only hold a verdict back, never promote one.
+        if regime_state is None:
+            try:
+                from app.services import regime as _regime
+
+                regime_state = _regime.current_state() or "unknown"
+            except Exception:  # noqa: BLE001
+                regime_state = "unknown"
+        verdict, headline, market = _market_gate(verdict, headline, regime_state)
         return {
             "symbol": sym, "price": round(price, 4), "score": score, "verdict": verdict, "headline": headline,
             "missing": missing, "pillars": [{"key": k, "label": LABELS[k], **out[k]} for k in PILLARS],
+            "market": market, "rvol": rvol_today,
             "risk_plan": risk_plan, "levels_position": pos, "as_of": str(candles[-1]["time"]),
             "basis": ("Yahoo daily candles. Trend = price vs 50-day and 20-day averages + swing structure; S/R = "
                       "tested zones; Volume = up-day share and this week vs 20-day average; Price action & "
                       "Patterns = the pattern scanner; Risk = stop under the nearest support, first target at the "
-                      "nearest resistance, liquidity floor."),
+                      "nearest resistance, liquidity floor. Market = EGX30 regime (bull / neutral / bear): a bear "
+                      "tape turns SETUP into WATCH."),
             "computed_at": datetime.now(CAIRO).isoformat(),
         }
     except Exception as exc:  # noqa: BLE001

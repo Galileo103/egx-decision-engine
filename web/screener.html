@@ -75,7 +75,7 @@
       <section id="scorecardSection" class="pg-panel" style="display:none">
         <h2>Signal Scorecard — which scanners actually work</h2>
         <div class="pg-muted" style="font-size:12px;margin-bottom:10px">
-          Every scanner hit is graded by what the stock did 5, 10 and 20 sessions later, against EGX30 over the same window.
+          Every scanner hit is graded by what the stock did 5, 10, 20, 40 and 60 sessions later, against EGX30 over the same window, and stamped with the market regime (bull / neutral / bear) it fired in.
           A scanner's beat rate becomes its weight in the Candidates ranking — only after 20 graded hits, because a 60% hit
           rate on 5 trades is noise. Hits accumulate one day at a time from the post-close job.
         </div>
@@ -246,7 +246,8 @@
             if (!list.length) return PG.mk('span', { class: 'pg-muted' }, ['—']);
             list.forEach(function (s) { wrap.appendChild(PG.mk('span', { class: 'pg-badge' }, [String(s)])); });
             return wrap;
-          }
+          },
+          rvol: rvolCell
         }
       }));
       candidatesLoaded = true;
@@ -378,8 +379,16 @@
 
   var leadersLoaded = false;
   var leadersUniverse = 'EGX100';
+  var leadersSector = '';
 
   function pctCell(v) { return PG.pctNode(v); }
+  // Relative volume (volume / 20-day median): heavy >= 1.5x green, quiet < 0.7x red.
+  function rvolCell(v) {
+    if (v === null || v === undefined || v === '') return PG.mk('span', { class: 'pg-muted' }, ['—']);
+    var n = Number(v);
+    var cls = n >= 1.5 ? 'up' : (n < 0.7 ? 'down' : 'neutral');
+    return PG.mk('span', { class: 'badge ' + cls, title: 'Relative volume on the signal day: volume divided by the 20-day median. Heavy = at least 1.5x, quiet = under 0.7x.' }, [PG.num(n, 1) + '×']);
+  }
   function flagCell(v) {
     if (v === null || v === undefined) return PG.mk('span', { class: 'pg-muted' }, ['—']);
     return PG.mk('span', { class: 'badge ' + (v ? 'up' : 'neutral') }, [v ? 'yes' : 'no']);
@@ -395,6 +404,16 @@
     });
     sel.addEventListener('change', function () { leadersUniverse = sel.value; leadersLoaded = false; loadLeaders(true); });
     head.appendChild(PG.mk('label', { class: 'pg-field', style: 'margin:0' }, ['Universe ', sel]));
+    // Sector filter: the stored ranking carries every stock's sector; filtering is server-side.
+    var sectors = Array.isArray(payload.sectors) ? payload.sectors : [];
+    var secSel = PG.mk('select');
+    var optAll = PG.mk('option', { value: '' }, ['All sectors']); secSel.appendChild(optAll);
+    sectors.forEach(function (sc) {
+      var o = PG.mk('option', { value: sc.sector }, ['#' + sc.rank + ' ' + (sc.label || sc.sector) + ' (' + sc.members + ')']);
+      if (sc.sector === leadersSector) o.selected = true; secSel.appendChild(o);
+    });
+    secSel.addEventListener('change', function () { leadersSector = secSel.value; leadersLoaded = false; loadLeaders(true); });
+    head.appendChild(PG.mk('label', { class: 'pg-field', style: 'margin:0', title: 'Show only the stocks of one sector; sectors are listed by their own relative-strength rank' }, ['Sector ', secSel]));
     var info = rows.length + ' leader' + (rows.length === 1 ? '' : 's')
       + (payload.date ? ' · ranking of ' + payload.date : '')
       + (payload.ranked ? ' · ' + payload.ranked + ' ranked' : '')
@@ -405,9 +424,31 @@
     refresh.addEventListener('click', refreshLeaders);
     head.appendChild(refresh);
     box.appendChild(head);
+    if (sectors.length) {
+      var secWrap = PG.mk('details', { style: 'margin-bottom:10px' }, []);
+      secWrap.open = !leadersSector;
+      secWrap.appendChild(PG.mk('summary', { class: 'pg-muted', style: 'cursor:pointer;font-size:12.5px' }, ['Sector strength — ' + sectors.length + ' sectors ranked by the same 1m/3m/6m excess vs EGX30 (equal-weight index of each sector\'s ranked members)']));
+      secWrap.appendChild(PG.table(sectors, {
+        onRow: function (r) { leadersSector = r.sector; leadersLoaded = false; loadLeaders(true); },
+        columns: [
+          { key: 'rank', label: '#', numeric: true, render: function (r) { return PG.mk('span', {}, [String(r.rank)]); } },
+          { key: 'label', label: 'Sector', numeric: false, render: function (r) { return PG.mk('span', { title: (r.symbols || []).join(', ') }, [String(r.label || r.sector)]); } },
+          { key: 'members', label: 'Members', numeric: true, render: function (r) { return PG.mk('span', {}, [String(r.members)]); } },
+          { key: 'rs_score', label: 'RS score', numeric: true },
+          { key: 'ret_1m', label: '1m %', numeric: true, render: function (r) { return pctCell(r.ret_1m); } },
+          { key: 'ret_3m', label: '3m %', numeric: true, render: function (r) { return pctCell(r.ret_3m); } },
+          { key: 'ret_6m', label: '6m %', numeric: true, render: function (r) { return pctCell(r.ret_6m); } },
+          { key: 'excess_1m', label: 'vs EGX30 1m', numeric: true, render: function (r) { return pctCell(r.excess_1m); } },
+          { key: 'excess_3m', label: 'vs EGX30 3m', numeric: true, render: function (r) { return pctCell(r.excess_3m); } }
+        ]
+      }));
+      secWrap.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:11.5px;margin-top:4px' }, ['Click a sector row to filter the stocks below to it. A strong stock in a lagging sector is swimming upstream; the leaders of a leading sector are where the money already is.']));
+      box.appendChild(secWrap);
+    }
     if (!rows.length) {
       box.appendChild(PG.mk('div', { class: 'pg-muted' },
-        ['No ranking stored yet. The post-close job builds it every trading day at 15:00, or press Refresh to compute it now.']));
+        [leadersSector ? 'No ranked stock in this sector (illiquid names are filtered out). Pick another sector or "All sectors".'
+                       : 'No ranking stored yet. The post-close job builds it every trading day at 15:00, or press Refresh to compute it now.']));
       return;
     }
     box.appendChild(PG.table(rows, {
@@ -415,6 +456,12 @@
       columns: [
         { key: 'rank', label: '#', numeric: true },
         { key: 'symbol', label: 'Symbol', numeric: false },
+        { key: 'sector_label', label: 'Sector', numeric: false, render: function (r) {
+          if (!r.sector) return PG.mk('span', { class: 'pg-muted' }, ['—']);
+          return PG.mk('span', { title: 'Sector rank ' + (r.sector_rank || '?') + ' of ' + (r.sector_count || '?') + ' · stock #' + (r.rank_in_sector || '?') + ' of ' + (r.sector_size || '?') + ' in its sector' }, [String(r.sector_label || r.sector) + (r.sector_rank ? ' (#' + r.sector_rank + ')' : '')]);
+        } },
+        { key: 'rank_in_sector', label: 'In sector', numeric: false, render: function (r) { return r.rank_in_sector ? PG.mk('span', { class: 'badge ' + (r.rank_in_sector === 1 ? 'up' : 'neutral') }, ['#' + r.rank_in_sector + '/' + r.sector_size]) : PG.mk('span', { class: 'pg-muted' }, ['—']); } },
+        { key: 'rs_vs_sector_1m', label: 'vs sector 1m', numeric: true, render: function (r) { return pctCell(r.rs_vs_sector_1m); } },
         { key: 'price', label: 'Price', numeric: true },
         { key: 'rs_score', label: 'RS score', numeric: true },
         { key: 'ret_1m', label: '1m %', numeric: true, render: function (r) { return pctCell(r.ret_1m); } },
@@ -436,7 +483,7 @@
     var box = $('leadersBox');
     PG.loading(box, 'Loading stored ranking…');
     try {
-      var payload = await PG.api('get', '/api/screener/leaders?universe=' + encodeURIComponent(leadersUniverse) + '&limit=40');
+      var payload = await PG.api('get', '/api/screener/leaders?universe=' + encodeURIComponent(leadersUniverse) + '&limit=40' + (leadersSector ? '&sector=' + encodeURIComponent(leadersSector) : ''));
       renderLeaders(payload, box, false);
       leadersLoaded = true;
     } catch (e) {
@@ -463,6 +510,15 @@
   var patternsStatus = '';
   var patternsCategory = '';
   var hideCandles = true;
+  // Measured-verdict view (Proven edge): 'proven' (default) | 'not_negative' | 'all'; remembered per browser.
+  var PAT_VIEW_KEY = 'egxde.patterns.view';
+  var patternsView = (function () { try { var v = localStorage.getItem(PAT_VIEW_KEY); return (v === 'proven' || v === 'not_negative' || v === 'all') ? v : 'proven'; } catch (e) { return 'proven'; } })();
+  var EDGE_VERDICT_LABEL = { edge: ['proven', 'up'], marginal: ['unproven', 'neutral'], negative: ['negative', 'sell'], unmeasured: ['unmeasured', ''] };
+  function edgeBadge(r) {
+    var spec = EDGE_VERDICT_LABEL[r.edge_verdict] || EDGE_VERDICT_LABEL.unmeasured;
+    var tip = (r.edge_n ? r.edge_n + ' graded samples' : 'too few samples') + (r.edge_metric !== null && r.edge_metric !== undefined ? ' · ' + (r.edge_metric >= 0 ? '+' : '') + PG.num(r.edge_metric) + '% avg excess vs EGX30 at ' + (r.edge_horizon || 10) + ' sessions' : '');
+    return PG.mk('span', { class: 'badge ' + spec[1], title: tip }, [spec[0] + (r.edge_horizon ? ' ' + r.edge_horizon + 'd' : '')]);
+  }
   var PATTERN_CATEGORIES = [['', 'All categories'], ['reversal', 'Reversal'], ['triangle', 'Triangles'],
     ['continuation', 'Continuation'], ['wedge', 'Wedges'], ['channel', 'Channels'],
     ['candlestick', 'Candlesticks'], ['price_action', 'Price action']];
@@ -502,6 +558,12 @@
     });
     cat.addEventListener('change', function () { patternsCategory = cat.value; patternsLoaded = false; loadPatterns(true); });
     head.appendChild(PG.mk('label', { class: 'pg-field', style: 'margin:0' }, ['Category ', cat]));
+    var vw = PG.mk('select');
+    [['proven', 'Proven only'], ['not_negative', 'Hide negative'], ['all', 'Show all']].forEach(function (p) {
+      var o = PG.mk('option', { value: p[0] }, [p[1]]); if (p[0] === patternsView) o.selected = true; vw.appendChild(o);
+    });
+    vw.addEventListener('change', function () { patternsView = vw.value; try { localStorage.setItem(PAT_VIEW_KEY, patternsView); } catch (e) {} patternsLoaded = false; loadPatterns(true); });
+    head.appendChild(PG.mk('label', { class: 'pg-field', style: 'margin:0', title: 'Which pattern types to show, by their measured record on five years of EGX history (Proven edge table): proven = beat a random entry at the type reference horizon; negative = did worse than one' }, ['Record ', vw]));
     var hc = PG.mk('input', { type: 'checkbox', id: 'hideCandles' });
     hc.checked = hideCandles;
     hc.addEventListener('change', function () { hideCandles = hc.checked; patternsLoaded = false; loadPatterns(true); });
@@ -512,8 +574,12 @@
     head.appendChild(catalogBtn);
     var byCat = payload.by_category || {};
     var catBits = Object.keys(byCat).map(function (k) { return k.replace('_', ' ') + ' ' + byCat[k]; }).join(', ');
+    var hb = payload.hidden_by_verdict || {};
+    var hiddenBits = [hb.marginal ? hb.marginal + ' unproven' : null, hb.negative ? hb.negative + ' negative' : null, hb.unmeasured ? hb.unmeasured + ' unmeasured' : null].filter(Boolean);
     var info = rows.length + ' pattern' + (rows.length === 1 ? '' : 's')
       + (payload.confirmed !== undefined ? ' · ' + payload.confirmed + ' confirmed' : '')
+      + (hiddenBits.length ? ' · hidden: ' + hiddenBits.join(', ') : '')
+      + (payload.edge_measured === false ? ' · verdicts not measured yet (press Refresh on the Proven edge card)' : '')
       + (catBits ? ' · ' + catBits : '')
       + (payload.date ? ' · scan of ' + payload.date : '')
       + (live ? ' · scanned just now' : (payload.stored ? ' · stored by the post-close job' : ''));
@@ -524,7 +590,8 @@
     box.appendChild(head);
     if (!rows.length) {
       box.appendChild(PG.mk('div', { class: 'pg-muted' },
-        ['No patterns stored yet for this filter. The post-close job scans every trading day at 15:00, or press Scan now.']));
+        [hiddenBits.length ? 'No proven pattern for this filter. Hidden: ' + hiddenBits.join(', ') + '. Switch Record to "Show all" to see them.'
+                           : 'No patterns stored yet for this filter. The post-close job scans every trading day at 15:00, or press Scan now.']));
       return;
     }
     box.appendChild(PG.table(rows, {
@@ -535,6 +602,7 @@
           var suffix = r.broke === 'up' ? ' ↑ broke up' : (r.broke === 'down' ? ' ↓ broke down' : '');
           return PG.mk('span', { title: r.note || '' }, [String(r.label || r.pattern) + suffix]);
         } },
+        { key: 'edge_verdict', label: 'Record', numeric: false, render: function (r) { return edgeBadge(r); } },
         { key: 'category', label: 'Category', numeric: false, render: function (r) { return PG.mk('span', {}, [String(r.category || '').replace('_', ' ')]); } },
         { key: 'direction', label: 'Direction', numeric: false, render: function (r) { return directionBadge(r.direction); } },
         { key: 'kind', label: 'Kind', numeric: false },
@@ -551,6 +619,7 @@
         { key: 'stop_hint', label: 'Stop hint', numeric: true },
         { key: 'break_date', label: 'Break date', numeric: false },
         { key: 'break_volume_ratio', label: 'Break vol ×', numeric: true },
+        { key: 'rvol', label: 'RVOL', numeric: true, render: function (r) { return rvolCell(r.rvol); } },
         { key: 'start_date', label: 'Since', numeric: false },
         { key: 'median_value_20d', label: 'Median value 20d', numeric: true }
       ]
@@ -565,7 +634,7 @@
     PG.loading(box, 'Loading stored pattern scan…');
     try {
       var q = '?universe=' + encodeURIComponent(patternsUniverse) + (patternsStatus ? '&status=' + patternsStatus : '')
-        + (patternsCategory ? '&category=' + patternsCategory : '');
+        + (patternsCategory ? '&category=' + patternsCategory : '') + '&view=' + encodeURIComponent(patternsView);
       var payload = await PG.api('get', '/api/screener/patterns' + q);
       renderPatterns(payload, box, false);
       patternsLoaded = true;
@@ -581,6 +650,8 @@
       var payload = await PG.api('post', '/api/screener/patterns/refresh', { universe: patternsUniverse });
       if (patternsStatus) payload.rows = (payload.rows || []).filter(function (r) { return r.status === patternsStatus; });
       if (patternsCategory) payload.rows = (payload.rows || []).filter(function (r) { return r.category === patternsCategory; });
+      if (patternsView === 'proven') payload.rows = (payload.rows || []).filter(function (r) { return r.edge_verdict === 'edge'; });
+      else if (patternsView === 'not_negative') payload.rows = (payload.rows || []).filter(function (r) { return r.edge_verdict !== 'negative'; });
       renderPatterns(payload, box, true);
       PG.notify('Scan done: ' + (payload.found || 0) + ' patterns, ' + (payload.confirmed || 0) + ' confirmed', 'success');
     } catch (e) {
@@ -594,21 +665,32 @@
       var c = await PG.api('get', '/api/screener/patterns/catalog');
       box.innerHTML = '';
       var head = PG.mk('div', { class: 'pg-form', style: 'margin-bottom:10px;align-items:center' });
+      var bv = c.by_verdict || {};
       head.appendChild(PG.mk('div', { class: 'pg-muted pg-asof', style: 'margin:0;flex:1' },
-        [c.count + ' patterns in 7 categories · ' + c.detected + ' detected by the scanner']));
+        [c.count + ' patterns in 7 categories · ' + c.detected + ' detected by the scanner'
+          + (c.edge_measured ? ' · record on EGX history: ' + (bv.edge || 0) + ' proven, ' + (bv.marginal || 0) + ' unproven, ' + (bv.negative || 0) + ' negative, ' + (bv.unmeasured || 0) + ' unmeasured' : ' · verdicts not measured yet')]));
       var back = PG.mk('button', { type: 'button', class: 'pg-btn secondary' }, ['Back to scan']);
       back.addEventListener('click', function () { patternsLoaded = false; loadPatterns(true); });
       head.appendChild(back);
       box.appendChild(head);
+      var VORDER = { edge: 0, marginal: 1, unmeasured: 2, negative: 3 };
       var rows = (c.patterns || []).map(function (p) {
         var s = p.egx_stats || {};
+        var vh = s.verdict_by_horizon || {};
+        function short(v) { return v === 'edge' ? 'edge' : (v === 'negative' ? 'neg' : (v === 'marginal' ? 'flip' : (v ? 'few' : '—'))); }
         return { category: p.category_label, label: p.label, direction: p.direction, kind: p.kind,
           reliability: p.reliability, frequency: p.frequency, note: p.note,
+          edge_verdict: p.edge_verdict, edge_horizon: s.horizon, edge_n: s.n, edge_metric: s.edge_metric,
+          verdict_rank: VORDER[p.edge_verdict] === undefined ? 9 : VORDER[p.edge_verdict],
+          by_horizon: ['10', '20', '40', '60'].map(function (h) { return h + 'd ' + short(vh[h]); }).join(' · '),
           egx_graded: s.graded, egx_win_10d: s.win_rate_10d, egx_beat_10d: s.beat_rate_10d, egx_excess_10d: s.avg_excess_10d };
       });
+      rows.sort(function (a, b) { return a.verdict_rank - b.verdict_rank || (b.edge_metric || 0) - (a.edge_metric || 0); });
       box.appendChild(PG.table(rows, {
-        maxCols: 12,
+        maxCols: 14,
         columns: [
+          { key: 'edge_verdict', label: 'Record', numeric: false, render: function (r) { return edgeBadge(r); } },
+          { key: 'by_horizon', label: 'By horizon (10/20/40/60)', numeric: false, render: function (r) { return PG.mk('span', { class: 'pg-muted', style: 'font-size:11px;white-space:nowrap', title: 'Verdict at each grading horizon: edge / flip (coin flip) / neg (negative) / few (too few samples)' }, [r.by_horizon]); } },
           { key: 'category', label: 'Category', numeric: false },
           { key: 'label', label: 'Pattern', numeric: false },
           { key: 'direction', label: 'Direction', numeric: false, render: function (r) { return directionBadge(r.direction); } },
@@ -653,8 +735,10 @@
       return;
     }
     var rows = names.map(function (n) {
-      var s = scanners[n], h5 = (s.horizons || {})['5'] || {}, h10 = (s.horizons || {})['10'] || {}, h20 = (s.horizons || {})['20'] || {};
+      var s = scanners[n], hz = s.horizons || {}, h5 = hz['5'] || {}, h10 = hz['10'] || {}, h20 = hz['20'] || {}, h40 = hz['40'] || {}, h60 = hz['60'] || {};
       var src = s.sources || {};
+      var reg = s.by_regime || {}, bull10 = (reg.bull || {})['10'] || {}, bear10 = (reg.bear || {})['10'] || {};
+      var rvs = s.by_rvol || {}, heavy10 = (rvs['ge1.5'] || {})['10'] || {}, quiet10 = (rvs['lt1'] || {})['10'] || {};
       return {
         scanner: n, hits_graded: s.hits_graded, weight: s.weight, weight_basis: s.weight_basis,
         source: (src.live ? src.live + ' live' : '') + (src.live && src.replay ? ' · ' : '') + (src.replay ? src.replay + ' replay' : ''),
@@ -663,9 +747,22 @@
         vs_random_10: h10.beat_vs_random_pp,
         n_10: h10.n, win_10: h10.win_rate, beat_10: h10.beat_rate, excess_10: h10.avg_excess,
         n_5: h5.n, beat_5: h5.beat_rate, excess_5: h5.avg_excess,
-        n_20: h20.n, beat_20: h20.beat_rate, excess_20: h20.avg_excess
+        n_20: h20.n, beat_20: h20.beat_rate, excess_20: h20.avg_excess,
+        n_40: h40.n, beat_40: h40.beat_rate, excess_40: h40.avg_excess,
+        n_60: h60.n, beat_60: h60.beat_rate, excess_60: h60.avg_excess,
+        bull_n: bull10.n, bull_excess_vs_random: bull10.excess_vs_random,
+        bear_n: bear10.n, bear_excess_vs_random: bear10.excess_vs_random,
+        heavy_n: heavy10.n, heavy_excess: heavy10.avg_excess,
+        quiet_n: quiet10.n, quiet_excess: quiet10.avg_excess,
+        rvol_mult_heavy: ((card.rvol_multipliers || {})['ge1.5'] || {})[n],
+        rvol_mult_quiet: ((card.rvol_multipliers || {})['lt1'] || {})[n]
       };
     });
+    if (card.regime) {
+      box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:12px;margin-bottom:6px' },
+        ['Today’s regime: ' + card.regime + ' — Candidates use each scanner’s ' + card.regime + '-tape weight where it has ' + card.min_sample + '+ graded hits in that tape; ' + (card.outcomes_with_regime || 0) + ' of ' + (card.outcomes || 0) + ' graded signals carry a regime stamp'
+          + (card.outcomes_with_rvol !== undefined ? ', ' + card.outcomes_with_rvol + ' carry a relative-volume stamp (heavy / quiet columns; a scanner whose heavy-volume hits do better gets a Candidates multiplier above 1 on heavy days).' : '.')]));
+    }
     box.appendChild(PG.table(rows, {
       columns: [
         { key: 'scanner', label: 'Scanner', numeric: false, render: function (r) {
@@ -688,7 +785,13 @@
         { key: 'n_5', label: 'n 5d', numeric: true }, { key: 'beat_5', label: 'Right-way 5d %', numeric: true }, { key: 'excess_5', label: 'Avg excess 5d %', numeric: true, render: function (r) { return pctCell(r.excess_5); } },
         { key: 'n_10', label: 'n 10d', numeric: true }, { key: 'win_10', label: 'Win 10d %', numeric: true }, { key: 'beat_10', label: 'Right-way 10d %', numeric: true },
         { key: 'vs_random_10', label: 'vs random 10d', numeric: true, render: function (r) { return pctCell(r.vs_random_10); } }, { key: 'excess_10', label: 'Avg excess 10d %', numeric: true, render: function (r) { return pctCell(r.excess_10); } },
-        { key: 'n_20', label: 'n 20d', numeric: true }, { key: 'beat_20', label: 'Right-way 20d %', numeric: true }, { key: 'excess_20', label: 'Avg excess 20d %', numeric: true, render: function (r) { return pctCell(r.excess_20); } }
+        { key: 'n_20', label: 'n 20d', numeric: true }, { key: 'beat_20', label: 'Right-way 20d %', numeric: true }, { key: 'excess_20', label: 'Avg excess 20d %', numeric: true, render: function (r) { return pctCell(r.excess_20); } },
+        { key: 'n_40', label: 'n 40d', numeric: true }, { key: 'beat_40', label: 'Right-way 40d %', numeric: true }, { key: 'excess_40', label: 'Avg excess 40d %', numeric: true, render: function (r) { return pctCell(r.excess_40); } },
+        { key: 'n_60', label: 'n 60d', numeric: true }, { key: 'beat_60', label: 'Right-way 60d %', numeric: true }, { key: 'excess_60', label: 'Avg excess 60d %', numeric: true, render: function (r) { return pctCell(r.excess_60); } },
+        { key: 'bull_excess_vs_random', label: 'Bull tape vs random 10d', numeric: true, render: function (r) { var c = pctCell(r.bull_excess_vs_random); c.title = (r.bull_n || 0) + ' signals fired in a bull regime; excess minus the bull-tape random entry'; return c; } },
+        { key: 'bear_excess_vs_random', label: 'Bear tape vs random 10d', numeric: true, render: function (r) { var c = pctCell(r.bear_excess_vs_random); c.title = (r.bear_n || 0) + ' signals fired in a bear regime; excess minus the bear-tape random entry'; return c; } },
+        { key: 'heavy_excess', label: 'Heavy volume 10d excess', numeric: true, render: function (r) { var c = pctCell(r.heavy_excess); c.title = (r.heavy_n || 0) + ' signals whose day traded at least 1.5x the 20-day median volume' + (r.rvol_mult_heavy ? ' · Candidates multiplier ' + PG.num(r.rvol_mult_heavy) : ''); return c; } },
+        { key: 'quiet_excess', label: 'Quiet volume 10d excess', numeric: true, render: function (r) { var c = pctCell(r.quiet_excess); c.title = (r.quiet_n || 0) + ' signals whose day traded under the 20-day median volume' + (r.rvol_mult_quiet ? ' · Candidates multiplier ' + PG.num(r.rvol_mult_quiet) : ''); return c; } }
       ]
     }));
     if (card.basis) box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:11.5px;margin-top:6px' }, [card.basis]));

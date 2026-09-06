@@ -30,6 +30,32 @@ async def market_session() -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+@router.get("/regime")
+async def market_regime(history: int = Query(0, ge=0, le=1500)) -> dict[str, Any]:
+    """Today's market regime (bull / neutral / bear) with its plain-language sentence;
+    ``history=N`` adds the last N daily rows for a strip chart."""
+    try:
+        from app.services import regime
+
+        out = await asyncio.to_thread(regime.current)
+        if history:
+            out["history"] = await asyncio.to_thread(regime.history, history)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
+@router.post("/regime/refresh")
+async def market_regime_refresh() -> dict[str, Any]:
+    """Recompute the last year of regime rows now (post-close does this automatically)."""
+    try:
+        from app.services import regime
+
+        return await asyncio.to_thread(regime.update_today)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
 @router.get("/overview")
 async def market_overview(
     timeframe: str = Query("1D"),

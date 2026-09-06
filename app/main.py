@@ -25,13 +25,16 @@ _ROUTERS: list[Any] = []
 _router_error: str | None = None
 try:
     from app.api import (
+        routes_actions,
         routes_alerts,
         routes_backtest,
         routes_brief,
         routes_compare,
         routes_edge,
+        routes_flows,
         routes_market,
         routes_portfolio,
+        routes_review,
         routes_screener,
         routes_stocks,
         routes_symbols,
@@ -48,6 +51,9 @@ try:
         routes_brief.router,
         routes_edge.router,
         routes_compare.router,
+        routes_review.router,
+        routes_actions.router,
+        routes_flows.router,
         routes_symbols.router,
     ]
 except Exception as exc:  # noqa: BLE001

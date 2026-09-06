@@ -101,6 +101,15 @@ def daily_candles(symbol: str, range_: str = "1y") -> list[dict]:
         return []
     if not isinstance(payload, dict) or "error" in payload:
         return []
+    # Dividends / splits ride along with the bars: keep them so the pattern
+    # scanner and the Guardian can tell an ex-date gap from a market move.
+    if payload.get("events"):
+        try:
+            from app.services import corporate_actions
+
+            corporate_actions.record_yahoo(symbol, payload.get("events"))
+        except Exception as exc:  # noqa: BLE001 — bookkeeping must never break a fetch
+            logger.warning("corporate actions bookkeeping failed for %s: %s", symbol, exc)
     candles = [
         c for c in (payload.get("candles") or [])
         if isinstance(c, dict) and _num(c.get("close")) is not None
@@ -326,6 +335,170 @@ def _symbol_metrics(symbol: str, bench: dict[str, Any]) -> Optional[dict]:
     return row
 
 
+# ── sectors (TA roadmap Task 7) ──────────────────────────────────────────────
+
+#: Sector index rows are stored in rs_leaders under this symbol prefix.
+SECTOR_PREFIX = "SECTOR:"
+#: A sector needs this many members with usable candles before it gets an index.
+MIN_SECTOR_MEMBERS = 2
+
+
+def sector_of(symbol: str) -> Optional[str]:
+    """Sector key for a bare EGX ticker ('banks', 'real_estate', …); None when unclassified."""
+    try:
+        from tradingview_mcp.core.data.egx_sectors import get_sector
+
+        s = get_sector(str(symbol or "").upper().split(":")[-1])
+        return s if s and s != "other" else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def sector_label(key: Optional[str]) -> Optional[str]:
+    if not key:
+        return None
+    try:
+        from tradingview_mcp.core.data.egx_sectors import SECTOR_DISPLAY_NAMES
+
+        return str(SECTOR_DISPLAY_NAMES.get(key) or key.replace("_", " ").title())
+    except Exception:  # noqa: BLE001
+        return key.replace("_", " ").title()
+
+
+def _series_return(series: dict[str, float], dates: list[str], h: int) -> Optional[float]:
+    if len(dates) <= h:
+        return None
+    a, b = series.get(dates[-1 - h]), series.get(dates[-1])
+    return (b / a - 1.0) if (a and b and a > 0) else None
+
+
+def sector_strength(rows: list[dict], bench: dict[str, Any]) -> list[dict]:
+    """Equal-weight sector indices built from the ranked stocks' own candles (already
+    cached by the sweep), with 1m/3m/6m returns and excess over EGX30, ranked by the
+    same 30/40/30 weighting as the stocks. Pure apart from the candle cache."""
+    groups: dict[str, list[str]] = {}
+    for r in rows:
+        sec = r.get("sector")
+        if sec:
+            groups.setdefault(sec, []).append(str(r["symbol"]))
+    out: list[dict] = []
+    for sec, members in groups.items():
+        if len(members) < MIN_SECTOR_MEMBERS:
+            continue
+        series = _proxy_index(members)
+        dates = sorted(series)
+        if len(dates) < HORIZONS["1m"] + 2:
+            continue
+        row: dict[str, Any] = {"sector": sec, "label": sector_label(sec), "members": len(members),
+                               "symbols": sorted(members), "as_of": dates[-1]}
+        for name, h in HORIZONS.items():
+            ret = _series_return(series, dates, h)
+            b = benchmark_return(bench, dates[-1 - h], dates[-1]) if len(dates) > h else None
+            row[f"ret_{name}"] = round(ret * 100.0, 2) if ret is not None else None
+            row[f"excess_{name}"] = round((ret - b) * 100.0, 2) if (ret is not None and b is not None) else None
+        out.append(row)
+    # Weighted score across horizons (excess, falling back to raw return), then rank.
+    ranks: dict[str, dict[str, float]] = {}
+    for name in HORIZONS:
+        vals = {}
+        for r in out:
+            v = r.get(f"excess_{name}")
+            if v is None:
+                v = r.get(f"ret_{name}")
+            if v is not None:
+                vals[r["sector"]] = float(v)
+        ranks[name] = _percentile_ranks(vals)
+    for r in out:
+        total, weight = 0.0, 0.0
+        for name, w in _WEIGHTS.items():
+            pr = ranks[name].get(r["sector"])
+            if pr is not None:
+                total += pr * w
+                weight += w
+        r["rs_score"] = round(total / weight, 1) if weight else None
+    out.sort(key=lambda r: (r.get("rs_score") is not None, r.get("rs_score") or 0.0), reverse=True)
+    for i, r in enumerate(out, 1):
+        r["rank"] = i
+    return out
+
+
+def attach_sectors(rows: list[dict], sectors: list[dict]) -> None:
+    """Stamp each stock row with its sector, the sector's rank, the stock's rank inside
+    the sector (by RS score) and its 1m/3m return minus the sector's. In place."""
+    by_sec = {s["sector"]: s for s in sectors}
+    n_sectors = len(sectors)
+    members: dict[str, list[dict]] = {}
+    for r in rows:
+        if r.get("sector"):
+            members.setdefault(r["sector"], []).append(r)
+    for sec, rs in members.items():
+        rs_sorted = sorted(rs, key=lambda r: (r.get("rs_score") is not None, r.get("rs_score") or 0.0), reverse=True)
+        for i, r in enumerate(rs_sorted, 1):
+            r["rank_in_sector"] = i
+            r["sector_size"] = len(rs_sorted)
+    for r in rows:
+        sec = r.get("sector")
+        s = by_sec.get(sec) if sec else None
+        r["sector_label"] = sector_label(sec)
+        r["sector_rank"] = s.get("rank") if s else None
+        r["sector_count"] = n_sectors
+        r["sector_rs_score"] = s.get("rs_score") if s else None
+        for name in ("1m", "3m"):
+            sr = s.get(f"ret_{name}") if s else None
+            r[f"rs_vs_sector_{name}"] = (round(r[f"ret_{name}"] - sr, 2)
+                                         if (s and r.get(f"ret_{name}") is not None and sr is not None) else None)
+        r.setdefault("rank_in_sector", None)
+        r.setdefault("sector_size", None)
+
+
+def sector_context(symbol: str, universe: str = "EGX100") -> Optional[dict]:
+    """The stored sector reading for one stock (instant, from the latest ranking):
+    {sector, sector_label, sector_rank, sector_count, sector_excess_3m, rank_in_sector,
+    sector_size, rs_vs_sector_1m, rs_vs_sector_3m, date}. None when not ranked."""
+    try:
+        sym = str(symbol or "").upper().split(":")[-1]
+        uni = (universe or "EGX100").upper()
+        d = db.query("SELECT MAX(date) AS d FROM rs_leaders WHERE universe = ?", (uni,))
+        date = d[0].get("d") if d else None
+        if not date:
+            return None
+        rows = db.query("SELECT payload_json FROM rs_leaders WHERE universe = ? AND date = ? AND symbol = ?",
+                        (uni, date, sym))
+        if not rows:
+            return None
+        r = json.loads(rows[0]["payload_json"])
+        sec = r.get("sector")
+        if not sec:
+            return {"sector": None, "date": date}
+        srow = db.query("SELECT payload_json FROM rs_leaders WHERE universe = ? AND date = ? AND symbol = ?",
+                        (uni, date, SECTOR_PREFIX + sec))
+        s = json.loads(srow[0]["payload_json"]) if srow else {}
+        return {"sector": sec, "sector_label": r.get("sector_label") or sector_label(sec),
+                "sector_rank": r.get("sector_rank"), "sector_count": r.get("sector_count"),
+                "sector_rs_score": s.get("rs_score"), "sector_excess_1m": s.get("excess_1m"),
+                "sector_excess_3m": s.get("excess_3m"), "rank_in_sector": r.get("rank_in_sector"),
+                "sector_size": r.get("sector_size"), "rs_vs_sector_1m": r.get("rs_vs_sector_1m"),
+                "rs_vs_sector_3m": r.get("rs_vs_sector_3m"), "date": date}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sector_context(%s) failed: %s", symbol, exc)
+        return None
+
+
+def sector_sentence(ctx: Optional[dict]) -> str:
+    """One sentence for the checklist's Trend pillar; '' when nothing is stored."""
+    if not ctx or not ctx.get("sector") or ctx.get("sector_rank") is None:
+        return ""
+    lead = ctx["sector_rank"] <= max(1, (ctx.get("sector_count") or 1) // 3)
+    lag = ctx["sector_rank"] > (ctx.get("sector_count") or 1) - max(1, (ctx.get("sector_count") or 1) // 3)
+    txt = (f"Sector: {ctx['sector_label']} ranks {ctx['sector_rank']} of {ctx['sector_count']} sectors by relative "
+           f"strength" + (" — a leading sector" if lead else " — a lagging sector; money is elsewhere" if lag else ""))
+    if ctx.get("rank_in_sector") and ctx.get("sector_size"):
+        txt += f"; the stock is #{ctx['rank_in_sector']} of {ctx['sector_size']} inside it"
+    if ctx.get("rs_vs_sector_1m") is not None:
+        txt += f" ({ctx['rs_vs_sector_1m']:+.1f} pts vs the sector over 1m)"
+    return txt + "."
+
+
 def compute(
     universe: str = "EGX100",
     limit: int = 40,
@@ -349,6 +522,7 @@ def compute(
             if row is None:
                 skipped += 1
             else:
+                row["sector"] = sector_of(sym)
                 rows.append(row)
             time.sleep(_FETCH_PAUSE)
 
@@ -386,12 +560,17 @@ def compute(
         kept.sort(key=lambda r: (r.get("rs_score") is not None, r.get("rs_score") or 0.0), reverse=True)
         for i, r in enumerate(kept, 1):
             r["rank"] = i
+        # Sector strength from the same candles (all cached by now): equal-weight
+        # sector indices ranked like the stocks, then each stock's place in its sector.
+        sectors = sector_strength(rows, bench)
+        attach_sectors(rows, sectors)
         top = kept[: max(1, int(limit))]
         date = datetime.now(CAIRO).strftime("%Y-%m-%d")
         if persist and kept:
-            _persist(date, uni, kept)
+            _persist(date, uni, kept, sectors)
         return {
             "rows": top,
+            "sectors": sectors,
             "universe": uni,
             "date": date,
             "as_of": _now_iso(),
@@ -406,7 +585,9 @@ def compute(
             "basis": (
                 "Returns from Yahoo daily closes (delayed, not dividend-adjusted). "
                 "RS score = percentile rank of excess return vs EGX30 over 1m/3m/6m, "
-                "weighted 30/40/30. New high = within 2% of the 52-week high."
+                "weighted 30/40/30. New high = within 2% of the 52-week high. Sector strength = the "
+                "same measure on an equal-weight index of each sector's ranked members; rank in sector = "
+                "the stock's RS score against its sector peers."
             ),
         }
     except Exception as exc:  # noqa: BLE001
@@ -414,19 +595,25 @@ def compute(
         return {"error": str(exc)}
 
 
-def _persist(date: str, uni: str, rows: list[dict]) -> None:
+def _persist(date: str, uni: str, rows: list[dict], sectors: Optional[list[dict]] = None) -> None:
     db.executemany(
         "INSERT OR REPLACE INTO rs_leaders (date, universe, symbol, rank, rs_score, payload_json, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
             (date, uni, r["symbol"], r.get("rank"), r.get("rs_score"), json.dumps(r), _now_iso())
             for r in rows
+        ] + [
+            # Sector indices share the table under a reserved symbol prefix so one
+            # date's ranking is one transaction and one read.
+            (date, uni, SECTOR_PREFIX + s["sector"], s.get("rank"), s.get("rs_score"), json.dumps(s), _now_iso())
+            for s in (sectors or [])
         ],
     )
 
 
-def latest(universe: str = "EGX100", limit: int = 40) -> dict:
-    """Most recently persisted ranking for a universe (fast path for the UI)."""
+def latest(universe: str = "EGX100", limit: int = 40, sector: Optional[str] = None) -> dict:
+    """Most recently persisted ranking for a universe (fast path for the UI).
+    ``sector`` filters the stock rows to one sector key; the sector table is always returned."""
     try:
         uni = (universe or "EGX100").upper()
         dates = db.query(
@@ -434,24 +621,29 @@ def latest(universe: str = "EGX100", limit: int = 40) -> dict:
         )
         date = dates[0].get("d") if dates else None
         if not date:
-            return {"rows": [], "universe": uni, "date": None, "stored": False}
+            return {"rows": [], "sectors": [], "universe": uni, "date": None, "stored": False}
         rows = db.query(
-            "SELECT payload_json FROM rs_leaders WHERE universe = ? AND date = ? "
-            "ORDER BY rank ASC LIMIT ?",
-            (uni, date, max(1, int(limit))),
+            "SELECT symbol, payload_json FROM rs_leaders WHERE universe = ? AND date = ? ORDER BY rank ASC",
+            (uni, date),
         )
-        out = []
+        out: list[dict] = []
+        sectors: list[dict] = []
         for r in rows:
             try:
-                out.append(json.loads(r["payload_json"]))
+                payload = json.loads(r["payload_json"])
             except (TypeError, ValueError):
                 continue
-        total = db.query(
-            "SELECT COUNT(*) AS n FROM rs_leaders WHERE universe = ? AND date = ?", (uni, date)
-        )
+            if str(r["symbol"]).startswith(SECTOR_PREFIX):
+                sectors.append(payload)
+            else:
+                out.append(payload)
+        total = len(out)
+        if sector:
+            out = [r for r in out if r.get("sector") == sector]
+        out = out[: max(1, int(limit))]
         return {
-            "rows": out, "universe": uni, "date": date, "stored": True,
-            "ranked": total[0]["n"] if total else len(out),
+            "rows": out, "sectors": sectors, "universe": uni, "date": date, "stored": True,
+            "ranked": total, "sector": sector,
         }
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}

@@ -625,6 +625,39 @@ def snapshot_symbol(symbol: str, timeframe: str = "1D") -> dict:
         return {"error": str(exc), "symbol": bare}
 
 
+def stamp_session_rvol(date: Optional[str] = None) -> dict:
+    """Fill ``snapshots.rvol`` (volume / 20-day median volume) for one session.
+
+    Runs in the post-close job right after the rule scanner, when every stock's
+    daily candles are already in the shared cache, so this is a dictionary read
+    per symbol. Rows whose candles are unavailable keep NULL. Never raises.
+    """
+    try:
+        from app.services import leaders
+        from app.services.pattern_common import rvol as _rvol
+
+        if not date:
+            date = calendar_egx.last_trading_day(calendar_egx.now_cairo().date()).strftime("%Y-%m-%d")
+        rows = db.query("SELECT symbol FROM snapshots WHERE date = ? AND timeframe = '1D' AND rvol IS NULL", (date,))
+        updates: list[tuple] = []
+        for r in rows:
+            sym = str(r["symbol"])
+            if sym.startswith("^") or sym == "EGX30":
+                continue
+            candles = leaders.daily_candles(sym)
+            if not candles or str(candles[-1].get("time"))[:10] != date:
+                continue
+            rv = _rvol(candles)
+            if rv is not None:
+                updates.append((rv, sym, date))
+        if updates:
+            db.executemany("UPDATE snapshots SET rvol = ? WHERE symbol = ? AND date = ? AND timeframe = '1D'", updates)
+        return {"date": date, "stamped": len(updates), "pending": len(rows) - len(updates)}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stamp_session_rvol failed: %s", exc)
+        return {"error": str(exc)}
+
+
 def snapshot_universe(universe_name: str = "EGX100", timeframe: str = "1D",
                       include_held: bool = True) -> dict:
     """Snapshot every symbol in a universe into the ``snapshots`` table.

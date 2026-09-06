@@ -31,6 +31,9 @@ that applies; all reasons are listed):
                              sits above your current stop
     TIME_STOP      advice    held >= TIME_STOP_BARS sessions and still inside
                              +/-0.5R — dead money, capital has a cost
+    EX_DATE_SOON   advice    a dividend / split / rights ex-date is within
+                             EX_DATE_WARN_DAYS — the price will gap for a
+                             non-market reason; check the stop is not in it
     HOLD           ok        nothing above applies
 
 Everything here is advisory. Data is delayed and .CA Yahoo marks are often a
@@ -65,6 +68,7 @@ SEVERITY: dict[str, str] = {
     "THESIS_BROKEN": "warning",
     "TIGHTEN_STOP": "advice",
     "TIME_STOP": "advice",
+    "EX_DATE_SOON": "advice",
     "HOLD": "ok",
 }
 _RANK: dict[str, int] = {name: i for i, name in enumerate(SEVERITY)}
@@ -212,7 +216,12 @@ def assess_position(
 
     # Targets are profit levels: one at/below entry is a data-entry error, and
     # comparing the mark against it would celebrate a loss ("target hit" on a
-    # trade that is under water). Such targets are ignored and flagged.
+    # trade that is under water). Such targets are ignored and flagged. So is a
+    # target inside MIN_TARGET_ATR × ATR14 of entry: one ordinary session
+    # "hits" it, which is noise, not a profit level (CLHO 2026-09-06: T1 0.3%
+    # above entry read TARGET1_HIT the day it was opened).
+    atr = _atr(candles)
+    min_atr = float(getattr(settings, "min_target_atr", 1.0) or 0.0)
     plan_faults: list[str] = []
     if t1 is not None and t1 <= entry:
         plan_faults.append(f"target 1 ({t1:.2f}) is at/below your entry {entry:.2f}")
@@ -223,6 +232,15 @@ def assess_position(
     if t1 is not None and t2 is not None and t2 <= t1:
         plan_faults.append(f"target 2 ({t2:.2f}) is not above target 1 ({t1:.2f})")
         t2 = None
+    if atr and min_atr > 0:
+        for label, val in (("target 1", t1), ("target 2", t2)):
+            if val is not None and (val - entry) < min_atr * atr:
+                plan_faults.append(f"{label} ({val:.2f}) sits only {(val - entry) / atr:.2f} ATR above your entry "
+                                   f"{entry:.2f} (14-day ATR {atr:.2f}) — inside one day's normal range")
+                if label == "target 1":
+                    t1 = None
+                else:
+                    t2 = None
 
     r_now: Optional[float] = None
     unreal_pct: Optional[float] = None
@@ -245,7 +263,6 @@ def assess_position(
         highest_close = max(highest_close or price, price)
     if highest_close is not None and per_share_risk:
         peak_r = round((highest_close - entry) / per_share_risk, 2)
-    atr = _atr(candles)
     bars_held = len(since_entry)
     try:
         days_held = (datetime.now(CAIRO).date() - datetime.fromisoformat(opened_date).date()).days
@@ -495,6 +512,36 @@ def apply_sell_checklist(row: dict, sc: Optional[dict]) -> dict:
 # ── persistence / delivery ───────────────────────────────────────────────────
 
 
+def apply_corporate_actions(row: dict, event: Optional[dict] = None) -> dict:
+    """Add an EX_DATE_SOON advice when a known corporate action is imminent for the
+    position's symbol (``event`` may be injected for tests; else looked up). Pure
+    apart from that lookup; never changes a more severe verdict."""
+    try:
+        if event is None:
+            from app.services import corporate_actions as CA
+
+            event = CA.next_for(str(row.get("symbol") or ""))
+        row["corporate_action"] = event
+        if not event:
+            return row
+        from app.services import corporate_actions as CA
+
+        verdicts = list(row.get("all_verdicts") or [])
+        reasons = list(row.get("reasons") or [])
+        if "EX_DATE_SOON" not in verdicts:
+            verdicts.append("EX_DATE_SOON")
+        reasons.append(CA.warning_text(event))
+        row["all_verdicts"] = verdicts
+        row["reasons"] = reasons
+        verdict = min(verdicts, key=lambda v: _RANK.get(v, 99)) if verdicts else "HOLD"
+        row["verdict"] = verdict
+        row["severity"] = SEVERITY.get(verdict, "ok")
+        return row
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("corporate-action check failed for %s: %s", row.get("symbol"), exc)
+        return row
+
+
 def _already_notified(position_id: Any, verdict: str, date: str) -> bool:
     rows = db.query(
         "SELECT 1 FROM guardian_verdicts WHERE position_id = ? AND verdict = ? "
@@ -598,6 +645,7 @@ def evaluate(persist: bool = False, notify: bool = False) -> dict:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("guardian: sell checklist failed for %s: %s", symbol, exc)
                 row = apply_sell_checklist(row, None)
+            row = apply_corporate_actions(row)
             sent = False
             if notify and row["severity"] in NOTIFY_SEVERITIES:
                 if not _already_notified(row["position_id"], row["verdict"], today):

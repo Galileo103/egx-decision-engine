@@ -130,7 +130,7 @@ class TestScorecard:
             _hit(dates[i], "momentum", "AAA")
             _hit(dates[i], "squeeze", "BBB")
         r = scorecard.grade()
-        assert r["graded"] == 10 and r["fully_graded_20d"] == 10
+        assert r["graded"] == 10 and r["fully_graded_60d"] == 0   # 40 candles: no 60-session horizon yet
         card = scorecard.scorecard()
         mom = card["scanners"]["momentum"]["horizons"]["10"]
         sq = card["scanners"]["squeeze"]["horizons"]["10"]
@@ -198,7 +198,7 @@ class TestLeaders:
         assert leaders.compute("EGX30", limit=10, include_illiquid=True)["rows"][0]["liquid"] is False
 
     def test_latest_empty_before_first_run(self) -> None:
-        assert leaders.latest("EGX70") == {"rows": [], "universe": "EGX70", "date": None, "stored": False}
+        assert leaders.latest("EGX70") == {"rows": [], "sectors": [], "universe": "EGX70", "date": None, "stored": False}
 
 
 class TestLatestCandidates:

@@ -21,6 +21,8 @@ class SizeBody(BaseModel):
     account: Optional[float] = None
     risk_pct: Optional[float] = None
     symbol: Optional[str] = None  # enables the liquidity (% of ADV) check
+    target1: Optional[float] = None  # with a target: plan_quality (R:R + ATR distance) in the result
+    target2: Optional[float] = None
 
 
 class OpenPositionBody(BaseModel):
@@ -46,6 +48,7 @@ class UpdatePositionBody(BaseModel):
     target2: Optional[float] = None
     note: Optional[str] = None
     initial_stop: Optional[float] = None   # once, only while the record has none
+    allow_override: bool = False           # bypass the plan-quality gate on new targets
 
 
 class FillBody(BaseModel):
@@ -70,7 +73,8 @@ async def portfolio_size(body: SizeBody) -> dict[str, Any]:
         account = body.account if body.account is not None else settings.account_size
         risk_pct = body.risk_pct if body.risk_pct is not None else settings.risk_pct
         return await asyncio.to_thread(
-            portfolio.size_position, account, risk_pct, body.entry, body.stop, body.symbol
+            portfolio.size_position, account, risk_pct, body.entry, body.stop, body.symbol,
+            body.target1, body.target2,
         )
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
@@ -154,7 +158,7 @@ async def portfolio_update(position_id: int, body: UpdatePositionBody) -> dict[s
     try:
         return await asyncio.to_thread(
             portfolio.update_position, position_id, body.stop, body.target1, body.target2, body.note,
-            body.initial_stop,
+            body.initial_stop, body.allow_override,
         )
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
@@ -179,7 +183,24 @@ async def portfolio_config() -> dict[str, Any]:
         "risk_pct": settings.risk_pct,
         "fee_pct_per_side": settings.fee_pct_per_side,
         "max_open_heat_pct": portfolio.MAX_OPEN_HEAT_PCT,
+        "min_rr_t1": settings.min_rr_t1,
+        "min_target_atr": settings.min_target_atr,
+        "guardian_atr_mult": settings.guardian_atr_mult,   # the chart's chandelier trail uses it
     }
+
+
+@router.get("/plan-quality")
+async def portfolio_plan_quality(
+    entry: float, stop: Optional[float] = None, target1: Optional[float] = None,
+    target2: Optional[float] = None, symbol: Optional[str] = None,
+) -> dict[str, Any]:
+    """The plan-quality gate as a preview (R:R to target 1, ATR distance, faults) —
+    what the New-position form shows while you type, before the ledger blocks."""
+    try:
+        atr = await asyncio.to_thread(portfolio.atr14, symbol) if symbol else None
+        return portfolio.plan_quality(entry, stop, target1, target2, atr)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
 
 
 @router.get("/performance")

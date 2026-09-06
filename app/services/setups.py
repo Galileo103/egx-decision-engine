@@ -88,6 +88,7 @@ def compute(persist: bool = True, limit: int = 80, symbols: Optional[list[str]] 
                 "pillar_text": {p["key"]: p["text"] for p in ck.get("pillars") or []},
                 "risk_plan": ck.get("risk_plan"), "levels_position": ck.get("levels_position"),
                 "sources": sources.get(sym, []), "as_of": ck.get("as_of"),
+                "rvol": ck.get("rvol"), "market": (ck.get("market") or {}).get("state"),
             })
             time.sleep(_FETCH_PAUSE)
         rows.sort(key=lambda r: (_VERDICT_RANK.get(r["verdict"], 9), -r["score"], r["symbol"]))

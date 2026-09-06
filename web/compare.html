@@ -162,10 +162,23 @@
       w.appendChild(PG.mk('div', { class: 'cmp-sub' }, [rs.pct_from_52w_high !== undefined && rs.pct_from_52w_high !== null ? PG.num(rs.pct_from_52w_high, 1) + '% from 52w high' + (rs.new_high ? ' · new high' : '') : '']));
       return w;
     }, 'Return minus EGX30 over 1 and 3 months, in percentage points');
+    row('Sector strength', function (c) {
+      var sr = c.sector_rs; if (!sr || !sr.sector) return PG.mk('span', { class: 'pg-muted' }, [c.sector ? c.sector + ' · not ranked yet' : 'unclassified']);
+      var third = Math.max(1, Math.floor((sr.sector_count || 1) / 3));
+      var lead = sr.sector_rank <= third, lag = sr.sector_rank > (sr.sector_count || 1) - third;
+      var w = PG.mk('div');
+      w.appendChild(PG.mk('span', { class: 'badge ' + (lead ? 'up' : lag ? 'down' : 'neutral') }, [(sr.sector_label || sr.sector) + ' #' + sr.sector_rank + '/' + sr.sector_count]));
+      w.appendChild(PG.mk('div', { class: 'cmp-sub' }, ['stock #' + (sr.rank_in_sector || '?') + ' of ' + (sr.sector_size || '?') + ' in sector' + (sr.rs_vs_sector_1m !== null && sr.rs_vs_sector_1m !== undefined ? ' · ' + (sr.rs_vs_sector_1m >= 0 ? '+' : '') + PG.num(sr.rs_vs_sector_1m, 1) + ' pts vs sector 1m' : '')]));
+      return w;
+    }, 'The sector\'s relative-strength rank among all sectors (equal-weight index), and the stock\'s rank inside its sector');
     row('Liquidity', function (c) {
       var v = (c.rs || {}).median_value_20d; var ok = (c.risk_plan || {}).liquid;
       return PG.mk('span', { class: 'cmp-num ' + (ok === false ? 'down' : '') }, [v ? PG.num(v / 1e6, 1) + 'M EGP/day' : '—', ok === false ? ' · below floor' : '']);
     }, '20-day median traded value');
+    row('Relative volume', function (c) {
+      var v = c.rvol; if (v === null || v === undefined) return PG.mk('span', { class: 'pg-muted' }, ['—']);
+      return PG.mk('span', { class: 'cmp-num ' + (v >= 1.5 ? 'up' : v < 0.7 ? 'down' : '') }, [PG.num(v, 1) + '× the 20-day median' + (v >= 1.5 ? ' · heavy' : v < 0.7 ? ' · quiet' : '')]);
+    }, 'Last session volume divided by the 20-day median volume; breakouts on quiet volume tend to fail');
     row('Extension', function (c) {
       var e = c.extension_atr; if (e === null || e === undefined) return PG.mk('span', { class: 'pg-muted' }, ['—']);
       return PG.mk('span', { class: 'cmp-num ' + (e > 3 ? 'down' : e > 2 ? 'warn' : '') }, [(e > 0 ? '+' : '') + PG.num(e, 1) + ' ATR above 20-day' + (e > 3 ? ' · extended' : e > 2 ? ' · stretched' : '')]);

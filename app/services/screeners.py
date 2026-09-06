@@ -447,14 +447,54 @@ def _evidence_weight(scanners: list[str], weights: dict[str, float]) -> float:
     return round(sum(per_family.values()), 2)
 
 
-def _signal_weights() -> dict[str, float]:
+def _signal_weights(regime: Optional[str] = None, rvol_bucket: Optional[str] = None) -> dict[str, float]:
     try:
         from app.services import scorecard
 
-        return scorecard.signal_weights()
+        return scorecard.signal_weights(regime, rvol_bucket)
     except Exception as exc:  # noqa: BLE001 — ranking must never depend on the scorecard being healthy
         logger.warning("signal weights unavailable: %s", exc)
         return {}
+
+
+def _rvol_bucket(value: Any) -> Optional[str]:
+    from app.services.pattern_common import rvol_bucket
+
+    return rvol_bucket(value)
+
+
+def _rvol_for(symbol: str) -> Optional[float]:
+    """Relative volume of the last completed session from the shared candle cache
+    (None when the candles are not cached and cannot be fetched)."""
+    try:
+        from app.services import leaders
+        from app.services.pattern_common import rvol
+
+        return rvol(leaders.daily_candles(symbol))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("rvol unavailable for %s: %s", symbol, exc)
+        return None
+
+
+def _weights_by_bucket(regime: Optional[str], base: dict[str, float]) -> dict[str, dict[str, float]]:
+    """{bucket: weights} for the three relative-volume buckets ('' = unknown -> base)."""
+    from app.services.pattern_common import RVOL_BUCKETS
+
+    out: dict[str, dict[str, float]] = {"": base}
+    for b in RVOL_BUCKETS:
+        out[b] = _signal_weights(regime, b)
+    return out
+
+
+def _current_regime() -> Optional[str]:
+    """Today's market regime for regime-conditional weights; None when unknown."""
+    try:
+        from app.services import regime
+
+        return regime.current_state()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("regime unavailable: %s", exc)
+        return None
 
 
 def candidates(timeframe: str = "1D", persist: bool = False) -> dict:
@@ -541,6 +581,8 @@ def candidates(timeframe: str = "1D", persist: bool = False) -> dict:
                     entry["price"] = hit["price"]
                 if entry["change_pct"] is None and hit.get("change_pct") is not None:
                     entry["change_pct"] = hit["change_pct"]
+                if entry.get("rvol") is None and hit.get("rvol") is not None:
+                    entry["rvol"] = hit["rvol"]
         except Exception as exc:  # noqa: BLE001
             scanner_errors.append({"scanner": "proven_rules", "error": str(exc)})
 
@@ -576,12 +618,24 @@ def candidates(timeframe: str = "1D", persist: bool = False) -> dict:
             if price_data.get("change_percent") is not None:
                 entry["change_pct"] = price_data["change_percent"]
 
-        weights = _signal_weights()
+        regime_now = _current_regime()
+        weights = _signal_weights(regime_now)
+        # Relative volume of the session for each merged symbol (from the rule
+        # scanner's payload, else the cached candles) and the volume-aware weights:
+        # a breakout on heavy volume outranks a quiet one only where the record
+        # says the volume mattered (scorecard.rvol_multipliers).
+        for entry in ranked:
+            if entry.get("rvol") is None:
+                entry["rvol"] = _rvol_for(entry["symbol"])
+        weights_by_bucket = _weights_by_bucket(regime_now, weights)
+
+        def _w(e: dict) -> dict[str, float]:
+            return weights_by_bucket.get(_rvol_bucket(e.get("rvol")) or "", weights)
 
         def _final_key(e: dict) -> tuple:
             score = e.get("score")
             return (
-                _evidence_weight(e["scanners"], weights),  # proven evidence first
+                _evidence_weight(e["scanners"], _w(e)),  # proven evidence first
                 _family_count(e["scanners"]),              # independent evidence
                 len(e["scanners"]),                        # raw hits break family ties
                 score if isinstance(score, (int, float)) else -1.0,
@@ -611,7 +665,8 @@ def candidates(timeframe: str = "1D", persist: bool = False) -> dict:
                 "scanners": entry["scanners"],
                 "hit_count": len(entry["scanners"]),
                 "family_count": _family_count(entry["scanners"]),
-                "evidence_weight": _evidence_weight(entry["scanners"], weights),
+                "evidence_weight": _evidence_weight(entry["scanners"], _w(entry)),
+                "rvol": entry.get("rvol"),
                 "score": entry.get("score"),
                 "grade": entry.get("grade"),
                 "price": entry.get("price"),
@@ -637,7 +692,7 @@ def candidates(timeframe: str = "1D", persist: bool = False) -> dict:
             "scored_top_n": min(_SCORE_TOP_N, len(ranked)),
             "filtered_illiquid": filtered_illiquid,
             "min_daily_value_egp": min_value,
-            "signal_weights": weights,
+            "signal_weights": weights, "regime": regime_now,
             "ranking_basis": (
                 "Ranked by track-record-weighted evidence (sum over signal families of the "
                 "scanner's Scorecard weight; 1.0 until a scanner has enough graded hits), then "
@@ -716,12 +771,19 @@ def latest_candidates(limit: int = 20) -> dict:
                         e["score"] = payload.get(k)
                 if e["signal"] is None and isinstance(payload.get("signal"), str):
                     e["signal"] = payload.get("signal")
-        weights = _signal_weights()
+                if e.get("rvol") is None and isinstance(payload.get("rvol"), (int, float)):
+                    e["rvol"] = payload.get("rvol")
+        regime_now = _current_regime()
+        weights = _signal_weights(regime_now)
+        weights_by_bucket = _weights_by_bucket(regime_now, weights)
         out = []
         for e in merged.values():
             e["hit_count"] = len(e["scanners"])
             e["family_count"] = _family_count(e["scanners"])
-            e["evidence_weight"] = _evidence_weight(e["scanners"], weights)
+            if e.get("rvol") is None:
+                e["rvol"] = _rvol_for(e["symbol"])
+            e["evidence_weight"] = _evidence_weight(
+                e["scanners"], weights_by_bucket.get(_rvol_bucket(e.get("rvol")) or "", weights))
             out.append(e)
         out.sort(key=lambda e: (e["evidence_weight"], e["family_count"], e["hit_count"],
                                 e["score"] if isinstance(e.get("score"), (int, float)) else -1.0),
@@ -729,7 +791,7 @@ def latest_candidates(limit: int = 20) -> dict:
         shown = out[:max(1, int(limit))]
         scores_missing = sum(1 for e in shown if e.get("score") is None)
         return {"candidates": shown, "as_of": date, "stored": True,
-                "count": len(out), "signal_weights": weights,
+                "count": len(out), "signal_weights": weights, "regime": regime_now,
                 "scores_missing": scores_missing, "scores_expected": len(shown),
                 "degraded": _degraded_note(scores_missing, len(shown), live=False)}
     except Exception as exc:

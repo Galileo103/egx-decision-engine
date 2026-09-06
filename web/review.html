@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Review — EGX Decision Engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+<link rel="stylesheet" href="/assets/pg.css">
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  .rv-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .rv-week { font-family: var(--font-mono, monospace); font-size: 15px; font-weight: 600; }
+  .rv-headline { font-size: 13.5px; line-height: 1.55; margin: 6px 0 4px; }
+  .rv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+  .rv-read { font-size: 12.5px; color: var(--muted, #8B958F); margin-top: 8px; line-height: 1.5; }
+  .rv-kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13px; }
+  .rv-kv dt { color: var(--muted, #8B958F); }
+  .rv-kv dd { margin: 0; font-family: var(--font-mono, monospace); }
+  .rv-note { width: 100%; min-height: 110px; background: var(--panel2, #1C252B); color: var(--ink, #E8E6DE); border: 1px solid var(--line, #26313A); border-radius: 6px; padding: 8px 10px; font: inherit; font-size: 13px; resize: vertical; }
+  .rv-past { font-size: 12.5px; margin-top: 8px; }
+  .rv-past .wk { font-family: var(--font-mono, monospace); color: var(--muted, #8B958F); margin-right: 8px; }
+  .chart-box.rv { height: 200px; }
+</style>
+</head>
+<body>
+<div class="pg-layout">
+  <aside id="sidebar"></aside>
+  <div class="pg-main">
+    <header id="topbar"></header>
+    <main class="pg-content">
+      <section class="pg-panel" style="margin-bottom:14px">
+        <div class="rv-head">
+          <h2 style="margin:0">Weekly review — you versus the system</h2>
+          <span style="flex:1"></span>
+          <button type="button" class="pg-btn secondary" id="prevWeek" title="Previous trading week">◀ week</button>
+          <span class="rv-week" id="weekLabel">…</span>
+          <button type="button" class="pg-btn secondary" id="nextWeek" title="Next trading week">week ▶</button>
+          <button type="button" class="pg-btn secondary" id="digestBtn" title="Send this week's digest to Telegram now (the Saturday job does it automatically)">Send digest</button>
+        </div>
+        <div class="pg-muted" style="font-size:12.5px">Once a week, not once a day: what closed, what opened, your realised R per entry rule next to what the same rule made in the five-year replay, whether you followed the plan, whether you acted on the Guardian, the heat you carried, and one lesson in your own words. Trading weeks run Sunday to Thursday.</div>
+        <div id="headline" class="rv-headline"></div>
+      </section>
+
+      <div class="rv-grid" style="margin-bottom:14px">
+        <section class="pg-panel">
+          <h2>This week's trades</h2>
+          <div id="tradesBox"><div class="pg-muted">Loading…</div></div>
+        </section>
+        <section class="pg-panel">
+          <h2>Discipline</h2>
+          <div id="discBox"><div class="pg-muted">Loading…</div></div>
+        </section>
+      </div>
+
+      <section class="pg-panel" style="margin-bottom:14px">
+        <h2>You versus the system — realised R per entry rule (all closed trades)</h2>
+        <div id="vsBox"><div class="pg-muted">Loading…</div></div>
+      </section>
+
+      <div class="rv-grid" style="margin-bottom:14px">
+        <section class="pg-panel">
+          <h2>Guardian this week — did you act?</h2>
+          <div id="guardBox"><div class="pg-muted">Loading…</div></div>
+        </section>
+        <section class="pg-panel">
+          <h2>Heat carried each session · equity vs EGX30</h2>
+          <div id="heat" class="chart-box rv"></div>
+          <div id="heatBox" class="rv-read"></div>
+        </section>
+      </div>
+
+      <section class="pg-panel">
+        <h2>Lesson of the week</h2>
+        <div class="pg-muted" style="font-size:12.5px;margin-bottom:8px">One or two sentences in your own words: what the week taught you about your process (not about the market). It is stored per week and quoted in the Saturday digest.</div>
+        <textarea id="noteText" class="rv-note" placeholder="e.g. Sold SKPC on a red candle two days before the target; the plan said hold to T1. Next time: let the Guardian decide."></textarea>
+        <div style="display:flex;gap:10px;align-items:center;margin-top:8px">
+          <button type="button" class="pg-btn" id="saveNote">Save lesson</button>
+          <span class="pg-muted" id="noteMeta" style="font-size:12px"></span>
+        </div>
+        <div id="pastNotes" class="rv-past"></div>
+      </section>
+    </main>
+    <footer class="pg-footer">Analysis tooling — not financial advice. Data delayed ~15 min.</footer>
+  </div>
+</div>
+
+<script src="/assets/api.js"></script>
+<script src="/assets/ui.js"></script>
+<script src="/assets/pg.js"></script>
+<script src="/assets/charts.js"></script>
+<script>
+'use strict';
+(function () {
+  var PG = window.PG;
+  function $(id) { return document.getElementById(id); }
+  var current = null;   // the loaded review payload
+
+  function rBadge(r) {
+    if (r === null || r === undefined) return PG.mk('span', { class: 'pg-muted' }, ['n/a']);
+    return PG.mk('span', { class: 'badge ' + (r > 0 ? 'up' : (r < 0 ? 'down' : 'neutral')) }, [(r > 0 ? '+' : '') + PG.num(r) + 'R']);
+  }
+  function verdictBadge(v) {
+    var cls = { edge: 'up', marginal: 'neutral', negative: 'down' }[v] || 'neutral';
+    return v ? PG.mk('span', { class: 'badge ' + cls }, [v]) : PG.mk('span', { class: 'pg-muted' }, ['—']);
+  }
+
+  function renderTrades(rev) {
+    var box = $('tradesBox'); box.innerHTML = '';
+    var closed = rev.closed || [], opened = rev.opened || [];
+    if (!closed.length && !opened.length) {
+      box.appendChild(PG.mk('div', { class: 'pg-muted' }, ['Nothing closed or opened this week. A quiet week with the plan intact is a good week.']));
+      return;
+    }
+    if (closed.length) {
+      box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:12px;margin-bottom:4px' }, ['Closed · ' + closed.length + ' · net ' + (rev.week_pnl_net >= 0 ? '+' : '') + PG.num(rev.week_pnl_net, 0) + ' EGP' + (rev.week_avg_r !== null && rev.week_avg_r !== undefined ? ' · ' + (rev.week_avg_r >= 0 ? '+' : '') + PG.num(rev.week_avg_r) + 'R average' : '')]));
+      box.appendChild(PG.table(closed, {
+        onRow: PG.openStock,
+        columns: [
+          { key: 'symbol', label: 'Symbol', numeric: false },
+          { key: 'r_net', label: 'R (net)', numeric: true, render: function (r) { return rBadge(r.r_net); } },
+          { key: 'pnl_net', label: 'PnL EGP', numeric: true, render: function (r) { return PG.pctNode ? PG.mk('span', { class: (r.pnl_net || 0) >= 0 ? 'up' : 'down' }, [PG.num(r.pnl_net, 0)]) : PG.num(r.pnl_net, 0); } },
+          { key: 'exit_how', label: 'Ended by', numeric: false, render: function (r) { return PG.mk('span', { class: 'badge ' + (r.exit_how === 'discretionary' ? 'neutral' : 'accent'), title: 'stop = exit at/under the stop; target = at/over target 1; discretionary = by hand between the two' }, [r.exit_how]); } },
+          { key: 'plan_followed', label: 'Plan followed', numeric: false, render: function (r) { return r.plan_followed === null || r.plan_followed === undefined ? PG.mk('span', { class: 'pg-muted' }, ['not answered']) : PG.mk('span', { class: 'badge ' + (r.plan_followed ? 'up' : 'down') }, [r.plan_followed ? 'yes' : 'no']); } },
+          { key: 'held_days', label: 'Held (days)', numeric: true },
+          { key: 'rules', label: 'Entry rule(s)', numeric: false, render: function (r) { var w = PG.mk('span'); (r.rules || []).forEach(function (s) { w.appendChild(PG.mk('span', { class: 'pg-badge' }, [s])); }); if (!(r.rules || []).length) w.appendChild(PG.mk('span', { class: 'pg-muted' }, ['unattributed'])); return w; } },
+          { key: 'note', label: 'Your note at entry', numeric: false, render: function (r) { return PG.mk('span', { style: 'font-size:12px;white-space:normal;max-width:360px;display:inline-block', title: r.note || '' }, [String(r.note || '').slice(0, 140)]); } }
+        ]
+      }));
+    }
+    if (opened.length) {
+      box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:12px;margin:10px 0 4px' }, ['Opened · ' + opened.length]));
+      box.appendChild(PG.table(opened, {
+        onRow: PG.openStock,
+        columns: [
+          { key: 'symbol', label: 'Symbol', numeric: false },
+          { key: 'opened_at', label: 'Date', numeric: false },
+          { key: 'entry', label: 'Entry', numeric: true },
+          { key: 'stop', label: 'Stop', numeric: true },
+          { key: 'qty', label: 'Qty', numeric: true },
+          { key: 'status', label: 'Status', numeric: false },
+          { key: 'rules', label: 'Entry rule(s)', numeric: false, render: function (r) { var w = PG.mk('span'); (r.rules || []).forEach(function (s) { w.appendChild(PG.mk('span', { class: 'pg-badge' }, [s])); }); if (!(r.rules || []).length) w.appendChild(PG.mk('span', { class: 'pg-muted' }, ['no rule fired — discretionary entry'])); return w; } }
+        ]
+      }));
+    }
+  }
+
+  function renderDiscipline(rev) {
+    var box = $('discBox'); box.innerHTML = '';
+    var d = rev.discipline || {};
+    var dl = PG.mk('dl', { class: 'rv-kv' });
+    function kv(k, v) { dl.appendChild(PG.mk('dt', {}, [k])); dl.appendChild(PG.mk('dd', {}, [v])); }
+    kv('Plan followed', (d.followed_n || 0) + ' trade(s) · avg ' + (d.avg_r_followed === null || d.avg_r_followed === undefined ? 'n/a' : (d.avg_r_followed >= 0 ? '+' : '') + PG.num(d.avg_r_followed) + 'R'));
+    kv('Plan deviated', (d.deviated_n || 0) + ' trade(s) · avg ' + (d.avg_r_deviated === null || d.avg_r_deviated === undefined ? 'n/a' : (d.avg_r_deviated >= 0 ? '+' : '') + PG.num(d.avg_r_deviated) + 'R'));
+    kv('Question unanswered', String(d.unanswered_n || 0));
+    kv('Stops lowered', (d.stops_lowered || []).length ? (d.stops_lowered || []).join(', ') : 'none');
+    kv('Discretionary exits', (d.discretionary_exits || []).length ? (d.discretionary_exits || []).join(', ') : 'none');
+    var how = d.exits_by_how || {};
+    kv('Exits by', Object.keys(how).map(function (k) { return k + ' ' + how[k]; }).join(' · ') || '—');
+    box.appendChild(dl);
+    box.appendChild(PG.mk('div', { class: 'rv-read' }, [d.read || '']));
+  }
+
+  function renderVs(rev) {
+    var box = $('vsBox'); box.innerHTML = '';
+    var vs = rev.you_vs_system || {}, rows = vs.rows || [];
+    if (!rows.length) {
+      box.appendChild(PG.mk('div', { class: 'pg-muted' }, [(rev.closed_all_count || 0) + ' closed trade(s) so far' + ((vs.unattributed || []).length ? ', none attributable to an entry rule (no live rule fired on the fill session)' : '') + '. The comparison fills in as you close trades that the proven rules flagged.']));
+    } else {
+      box.appendChild(PG.table(rows, {
+        columns: [
+          { key: 'rule', label: 'Entry rule', numeric: false },
+          { key: 'n', label: 'Your trades', numeric: true },
+          { key: 'avg_r', label: 'Your avg R', numeric: true, render: function (r) { return rBadge(r.avg_r); } },
+          { key: 'win_rate', label: 'Your win %', numeric: true },
+          { key: 'system_avg_r', label: 'System avg R', numeric: true, render: function (r) { return rBadge(r.system_avg_r); } },
+          { key: 'system_win_rate', label: 'System win %', numeric: true },
+          { key: 'system_n', label: 'System trades', numeric: true },
+          { key: 'system_verdict', label: 'System verdict', numeric: false, render: function (r) { return verdictBadge(r.system_verdict); } },
+          { key: 'gap_r', label: 'Gap (you − system)', numeric: true, render: function (r) { return rBadge(r.gap_r); } },
+          { key: 'read', label: 'Reading', numeric: false, render: function (r) { return PG.mk('span', { style: 'font-size:12px;white-space:normal;display:inline-block;max-width:340px' }, [r.read]); } },
+          { key: 'symbols', label: 'Symbols', numeric: false, render: function (r) { return PG.mk('span', { class: 'pg-muted', style: 'font-size:11.5px' }, [(r.symbols || []).join(', ')]); } }
+        ]
+      }));
+    }
+    if ((vs.unattributed || []).length) {
+      box.appendChild(PG.mk('div', { class: 'rv-read' }, ['Unattributed (no rule fired on the fill session): ' + vs.unattributed.map(function (u) { return u.symbol + ' ' + (u.r_net >= 0 ? '+' : '') + PG.num(u.r_net) + 'R'; }).join(', ') + '. Discretionary entries are fine — but they have no system to compare with, so their R is entirely yours.']));
+    }
+    if (vs.basis) box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:11.5px;margin-top:6px' }, [vs.basis]));
+  }
+
+  function renderGuardian(rev) {
+    var box = $('guardBox'); box.innerHTML = '';
+    var g = rev.guardian || {}, rows = g.rows || [];
+    if (!rows.length) {
+      box.appendChild(PG.mk('div', { class: 'pg-muted' }, ['No non-HOLD Guardian verdicts this week.']));
+    } else {
+      box.appendChild(PG.table(rows, {
+        onRow: PG.openStock,
+        columns: [
+          { key: 'date', label: 'First day', numeric: false },
+          { key: 'symbol', label: 'Symbol', numeric: false },
+          { key: 'verdict', label: 'Verdict', numeric: false, render: function (r) { return PG.mk('span', { class: 'badge ' + ({ critical: 'down', action: 'up', warning: 'neutral', advice: 'neutral' }[r.severity] || 'neutral'), title: r.reason || '' }, [String(r.verdict || '').replace(/_/g, ' ')]); } },
+          { key: 'repeats', label: 'Days', numeric: true },
+          { key: 'r_now', label: 'R then', numeric: true, render: function (r) { return rBadge(r.r_now); } },
+          { key: 'acted', label: 'Acted?', numeric: false, render: function (r) { return r.acted ? PG.mk('span', { class: 'badge up' }, ['yes · ' + (r.how || '')]) : PG.mk('span', { class: 'badge ' + (r.severity === 'critical' || r.severity === 'action' ? 'down' : 'neutral') }, ['no ledger action']); } }
+        ]
+      }));
+    }
+    box.appendChild(PG.mk('div', { class: 'rv-read' }, [g.read || '']));
+  }
+
+  function renderHeat(rev) {
+    var heat = rev.heat || [];
+    var pts = heat.filter(function (h) { return h.heat_pct !== null && h.heat_pct !== undefined; }).map(function (h) { return { time: h.date, value: h.heat_pct }; });
+    if (window.Charts && pts.length >= 2) {
+      Charts.renderLine('heat', pts, { baseline: 6, baselineTitle: '6% cap', color: '#D2A44C', emptyMsg: 'No sessions' });
+    } else {
+      $('heat').innerHTML = '';
+      $('heat').appendChild(PG.mk('div', { class: 'pg-muted', style: 'padding:10px' }, [pts.length ? 'Heat ' + PG.num(pts[0].value, 1) + '% on ' + heat[0].date : 'No open positions this week.']));
+    }
+    var box = $('heatBox'); box.innerHTML = '';
+    var mx = heat.reduce(function (m, h) { return h.heat_pct !== null && h.heat_pct > m ? h.heat_pct : m; }, 0);
+    var perf = rev.performance || {};
+    var bits = ['Peak heat this week ' + PG.num(mx, 1) + '% of the account (cap 6%)' + (heat.length ? ' · ' + heat[heat.length - 1].open_positions + ' position(s) on ' + heat[heat.length - 1].date : '') + '.'];
+    if (perf && !perf.error) {
+      if (perf.benchmark_note) bits.push(perf.benchmark_note);
+      bits.push('All-time: ' + (perf.closed_count || 0) + ' closed · win ' + (perf.win_rate === null || perf.win_rate === undefined ? 'n/a' : PG.num(perf.win_rate, 0) + '%') + ' · avg ' + (perf.avg_r === null || perf.avg_r === undefined ? 'n/a' : (perf.avg_r >= 0 ? '+' : '') + PG.num(perf.avg_r) + 'R') + ' · realised ' + (perf.realized_pnl >= 0 ? '+' : '') + PG.num(perf.realized_pnl, 0) + ' EGP · unrealised ' + (perf.unrealized_pnl >= 0 ? '+' : '') + PG.num(perf.unrealized_pnl, 0) + ' EGP.');
+    }
+    bits.push('Heat per session uses each position’s current stop, so past days are an approximation.');
+    box.textContent = bits.join(' ');
+  }
+
+  function renderNote(rev) {
+    var n = rev.note || {};
+    $('noteText').value = n.text || '';
+    $('noteMeta').textContent = n.updated_at ? 'saved ' + String(n.updated_at).slice(0, 16).replace('T', ' ') : 'not written yet';
+    var past = $('pastNotes'); past.innerHTML = '';
+    var others = (rev.recent_notes || []).filter(function (x) { return x.week_start !== rev.week.start && x.text; });
+    if (others.length) {
+      past.appendChild(PG.mk('div', { class: 'pg-muted', style: 'margin-bottom:4px' }, ['Earlier lessons']));
+      others.forEach(function (x) { past.appendChild(PG.mk('div', {}, [PG.mk('span', { class: 'wk' }, [x.week_start]), x.text])); });
+    }
+  }
+
+  async function load(week) {
+    var q = week ? '?week=' + encodeURIComponent(week) : '';
+    ['tradesBox', 'discBox', 'vsBox', 'guardBox'].forEach(function (id) { PG.loading($(id), 'Loading…'); });
+    try {
+      var rev = await PG.api('get', '/api/review' + q);
+      current = rev;
+      $('weekLabel').textContent = rev.week.label;
+      $('headline').textContent = rev.headline || '';
+      renderTrades(rev); renderDiscipline(rev); renderVs(rev); renderGuardian(rev); renderHeat(rev); renderNote(rev);
+      try { history.replaceState(null, '', '/review.html?week=' + rev.week.start); } catch (e) { /* noop */ }
+    } catch (e) {
+      $('headline').textContent = '';
+      ['tradesBox', 'discBox', 'vsBox', 'guardBox'].forEach(function (id) { PG.errBox($(id), 'Review failed: ' + (e && e.message ? e.message : e)); });
+    }
+  }
+
+  async function saveNote() {
+    if (!current) return;
+    try {
+      var res = await PG.api('post', '/api/review/note', { week_start: current.week.start, text: $('noteText').value });
+      $('noteMeta').textContent = 'saved ' + String(res.updated_at || '').slice(0, 16).replace('T', ' ');
+      PG.notify('Lesson saved for ' + current.week.label, 'success');
+    } catch (e) { PG.notify('Save failed: ' + (e && e.message ? e.message : e), 'error'); }
+  }
+
+  async function sendDigest() {
+    if (!current) return;
+    var btn = $('digestBtn'); btn.disabled = true;
+    try {
+      var res = await PG.api('post', '/api/review/digest', { send: true, week: current.week.start });
+      PG.notify(res.sent ? 'Digest sent to Telegram' : 'Digest built but not sent (Telegram not configured or failed) — text copied below', res.sent ? 'success' : 'info');
+      if (!res.sent && res.text) { $('headline').textContent = res.text; }
+    } catch (e) { PG.notify('Digest failed: ' + (e && e.message ? e.message : e), 'error'); }
+    finally { btn.disabled = false; }
+  }
+
+  function init() {
+    PG.boot('review');
+    var params = new URLSearchParams(location.search);
+    load(params.get('week'));
+    $('prevWeek').addEventListener('click', function () { if (current) load(current.week.prev); });
+    $('nextWeek').addEventListener('click', function () { if (current) load(current.week.next); });
+    $('saveNote').addEventListener('click', saveNote);
+    $('digestBtn').addEventListener('click', sendDigest);
+  }
+  document.addEventListener('DOMContentLoaded', init);
+})();
+</script>
+</body>
+</html>

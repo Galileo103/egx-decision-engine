@@ -355,6 +355,7 @@
     { href: "backtest.html", label: "Backtest", ico: "↻", key: "backtest" },
     { href: "portfolio.html", label: "Portfolio", ico: "☷", key: "portfolio" },
     { href: "compare.html", label: "Compare", ico: "⇄", key: "compare" },
+    { href: "review.html", label: "Review", ico: "✎", key: "review" },
   ];
 
   function renderSidebar(active) {
@@ -424,6 +425,7 @@
       el("span", { class: "dot" }), "checking…",
     ]);
     host.appendChild(pill);
+    host.appendChild(buildRegimeChip());
     host.appendChild(buildDataAgeChip());
     host.appendChild(el("div", { class: "spacer" }));
 
@@ -446,6 +448,36 @@
       pill.appendChild(document.createTextNode("API offline"));
     });
 
+  }
+
+  /* ---------------- Market-regime chip ----------------
+     The six pillars look at one stock; the tape decides much of what happens
+     next (a random EGX long beats the index only ~44% of the time, mostly in
+     bull tapes). One chip on every page says which tape we are in.        */
+
+  var REGIME_LABEL = { bull: "Bull tape", neutral: "Mixed tape", bear: "Bear tape" };
+  var REGIME_CLASS = { bull: "open", neutral: "mixed", bear: "closed" };
+
+  function buildRegimeChip() {
+    var chip = el("span", { class: "pill loading", id: "regime-pill" }, [el("span", { class: "dot" }), "regime…"]);
+    chip.title = "Market regime: EGX30 versus its 50-day average, plus the share of EGX100 stocks above their own 50-day.";
+    API.get("/api/market/regime").then(function (r) {
+      clear(chip);
+      var st = r && r.state;
+      chip.className = "pill " + (REGIME_CLASS[st] || "loading");
+      chip.appendChild(el("span", { class: "dot" }));
+      var label = REGIME_LABEL[st] || "Regime unknown";
+      if (st && r.breadth_pct !== null && r.breadth_pct !== undefined) label += " · " + Math.round(r.breadth_pct) + "% above 50d";
+      if (st && r.stale) label += " · as of " + String(r.date || "").slice(5);
+      chip.appendChild(document.createTextNode(label));
+      if (r && r.text) chip.title = r.text + (r.stale ? " (computed for " + r.date + "; the post-close job refreshes it.)" : "");
+    }).catch(function () {
+      clear(chip);
+      chip.className = "pill loading";
+      chip.appendChild(el("span", { class: "dot" }));
+      chip.appendChild(document.createTextNode("regime n/a"));
+    });
+    return chip;
   }
 
   /* ---------------- Data-age chip ----------------

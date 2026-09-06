@@ -279,6 +279,8 @@ a:hover { text-decoration: underline; }
 .pill.closed { color: var(--down); border-color: rgba(229, 83, 75, 0.3); }
 .pill.closed .dot { background: var(--down); }
 .pill.loading { color: var(--muted); }
+.pill.mixed { color: var(--warn); border-color: rgba(210, 164, 76, 0.35); }
+.pill.mixed .dot { background: var(--warn); }
 
 .badge {
   display: inline-block;
@@ -771,6 +773,29 @@ a:hover { text-decoration: underline; }
 }
 .chart-box.short { height: 300px; }
 
+/* Indicator legend chips above the price chart (charts.js renderLegend). */
+.chart-legend { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.chart-chip {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0.6;
+}
+.chart-chip.on { opacity: 1; color: var(--ink); }
+.chart-chip.on.chip-sma20 { border-color: #7FB3FF; color: #7FB3FF; }
+.chart-chip.on.chip-sma50 { border-color: #D2A44C; color: #D2A44C; }
+.chart-chip.on.chip-sma200 { border-color: #C77DFF; color: #C77DFF; }
+.chart-chip.on.chip-chandelier { border-color: var(--warn); color: var(--warn); }
+.chart-chip.on.chip-rvol { border-color: var(--up); color: var(--up); }
+.chart-chip:hover { opacity: 1; }
+
 /* ---------- Global strip ---------- */
 
 .strip { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -962,3 +987,16 @@ a:hover { text-decoration: underline; }
 .tf-btn.active { background: var(--line); color: var(--text, inherit); }
 .tf-tag { font-size: 11px; font-weight: 400; margin-left: 4px; }
 .lv-w { font-size: 9.5px; padding: 0 4px; margin-left: 4px; line-height: 14px; }
+
+/* Investor flows card (dashboard) — who bought / who sold, pasted from EGX */
+.flow-item .si-val { font-family: var(--font-mono); font-size: 13px; }
+.flow-windows { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.flow-win { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; }
+.flow-win-label { color: var(--muted); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; min-width: 120px; }
+.flow-part b { font-family: var(--font-mono); font-weight: 600; }
+.flow-bars-wrap { display: flex; gap: 10px; align-items: flex-end; margin-top: 10px; }
+.flow-bars { display: flex; align-items: flex-end; gap: 3px; height: 38px; flex: 1; }
+.flow-bar { display: inline-block; flex: 1; max-width: 14px; min-height: 2px; border-radius: 2px 2px 0 0; background: var(--up); opacity: 0.85; }
+.flow-bar.down { background: var(--down); }
+.flow-reading { margin-top: 10px; font-size: 12.5px; line-height: 1.5; }
+.flow-remove:hover { color: var(--down); }

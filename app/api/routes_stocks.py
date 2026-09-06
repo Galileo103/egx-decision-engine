@@ -157,13 +157,29 @@ async def stock_checklist(symbol: str) -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+@router.get("/{symbol}/corporate-actions")
+async def stock_corporate_actions(symbol: str) -> dict[str, Any]:
+    """Dividends / splits (Yahoo) and manual events for one stock, plus the next one due."""
+    try:
+        from app.services import corporate_actions as CA
+
+        events = await asyncio.to_thread(CA.for_symbol, symbol)
+        nxt = await asyncio.to_thread(CA.next_for, symbol, 30)
+        return {"symbol": symbol.upper(), "events": events, "next": nxt, "warning": CA.warning_text(nxt) if nxt else ""}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
 @router.get("/{symbol}/patterns")
-async def stock_patterns(symbol: str) -> dict[str, Any]:
-    """Chart patterns (double/triple bottom/top, head & shoulders, cup) on the daily chart."""
+async def stock_patterns(symbol: str, view: str = Query("all")) -> dict[str, Any]:
+    """Chart patterns (double/triple bottom/top, head & shoulders, cup) on the daily chart.
+
+    ``view`` = proven | not_negative | all — filter by each pattern type's measured
+    verdict (Proven-edge table) before events and the decisive level are computed."""
     try:
         from app.services import patterns
 
-        return await asyncio.to_thread(patterns.detect, symbol)
+        return await asyncio.to_thread(patterns.detect, symbol, None, view)
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
 

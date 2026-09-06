@@ -94,7 +94,7 @@ class TestReplay:
         graded = db.query("SELECT COUNT(*) AS n FROM signal_outcomes WHERE source = 'replay'")[0]["n"]
         assert graded == out["graded"] > 0
         # signals inside the last 20 sessions cannot be fully graded yet
-        assert out["fully_graded_20d"] < out["graded"] or out["fully_graded_20d"] == out["graded"]
+        assert out["fully_graded_60d"] < out["graded"] or out["fully_graded_60d"] == out["graded"]
         # idempotent: a second run adds nothing
         again = replay.run("TEST", "1y", patterns=False)
         assert again["new_hits"] == 0
@@ -241,9 +241,11 @@ class TestEdge:
                 db.execute("INSERT INTO scanner_hits (date, scanner, symbol, payload_json, created_at, source) "
                            "VALUES (?, ?, ?, '{}', 'x', 'replay')", (f"2025-02-{(i % 28) + 1:02d}", scanner, f"P{i}"))
                 hid = db.query("SELECT MAX(id) AS id FROM scanner_hits")[0]["id"]
+                # graded at 10 AND 40 sessions: a triple top (reversal) is judged at 40, a hammer at 10
                 db.execute("INSERT INTO signal_outcomes (hit_id, date, scanner, symbol, entry_date, entry_close, "
-                           "ret_10, bench_10, excess_10, graded_at, source) VALUES (?, '2025-02-01', ?, ?, "
-                           "'2025-02-01', 10, -5.0, 0, -5.0, 'x', 'replay')", (hid, scanner, f"P{i}"))
+                           "ret_10, bench_10, excess_10, ret_40, bench_40, excess_40, graded_at, source) "
+                           "VALUES (?, '2025-02-01', ?, ?, '2025-02-01', 10, -5.0, 0, -5.0, -5.0, 0, -5.0, 'x', 'replay')",
+                           (hid, scanner, f"P{i}"))
         out = edge.compute("TEST", "1y", persist=True)
         assert "error" not in out
         assert out["baseline"] and out["baseline"]["sessions"] >= 500
@@ -261,7 +263,8 @@ class TestEdge:
         assert scorecard.baseline()["measured"] is True
         stored = edge.latest()
         assert stored["stored"] is True and stored["baseline"]["sessions"] == out["baseline"]["sessions"]
-        assert len(stored["rows"]) == len(out["rows"]) - 1          # baseline row lifted out of the table
+        n_base = sum(1 for r in out["rows"] if r["kind"] == "baseline")   # one yardstick per horizon
+        assert n_base >= 1 and len(stored["rows"]) == len(out["rows"]) - n_base   # baselines lifted out of the table
         assert stored["as_of"] and stored["rows"][0]["kind"] == "rule"   # rules first
         assert isinstance(stored["rows"][0]["extra"], dict)
 

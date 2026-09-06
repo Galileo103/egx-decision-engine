@@ -82,7 +82,7 @@ def rule_hits(symbol: str, candles: list[dict]) -> list[dict]:
             if fired:
                 out.append({
                     "date": x.t[i], "scanner": rule, "symbol": symbol,
-                    "payload": {"replay": True, "rule": rule, "close": round(x.c[i], 4)},
+                    "payload": {"replay": True, "rule": rule, "close": round(x.c[i], 4), "rvol": x.rvol[i]},
                 })
     return out
 
@@ -116,7 +116,7 @@ def pattern_hits(symbol: str, candles: list[dict]) -> list[dict]:
             out.append({
                 "date": last, "scanner": f"pattern_{row['pattern']}", "symbol": symbol,
                 "payload": {"replay": True, **{k: row.get(k) for k in
-                                               ("neckline", "target", "quality", "break_date", "direction")}},
+                                               ("neckline", "target", "quality", "break_date", "direction", "rvol")}},
             })
     return out
 
@@ -125,21 +125,29 @@ def checklist_hits(symbol: str, candles: list[dict], step: int = CHECKLIST_STEP)
     """The six-pillar BUY checklist's verdict on every ``step``-th past session,
     journaled as ``checklist_setup`` / ``checklist_watch`` / ``checklist_no_setup``
     so the Scorecard grades what a SETUP actually did next versus a NO SETUP."""
-    from app.services import checklist as CK
+    from app.services import checklist as CK, regime
 
+    regimes = regime.series()
     out: list[dict] = []
     for i in range(WARMUP, len(candles), max(1, int(step))):
         window = candles[max(0, i - CHECKLIST_WINDOW + 1): i + 1]
+        date = str(window[-1].get("time"))
         try:
-            ck = CK.checklist(symbol, candles=window)
+            # The regime the market was in on THAT session, not today's — the
+            # replayed verdict must be the one the app would have shown then.
+            ck = CK.checklist(symbol, candles=window, regime_state=regimes.at(date) or "unknown")
         except Exception:  # noqa: BLE001
             continue
         if not isinstance(ck, dict) or "error" in ck or not ck.get("verdict"):
             continue
+        mk = ck.get("market") or {}
+        vol = next((p for p in (ck.get("pillars") or []) if p.get("key") == "volume"), {})
         out.append({
-            "date": str(window[-1].get("time")), "scanner": f"checklist_{ck['verdict']}", "symbol": symbol,
+            "date": date, "scanner": f"checklist_{ck['verdict']}", "symbol": symbol,
             "payload": {"replay": True, "verdict": ck["verdict"], "score": ck.get("score"),
-                        "missing": ck.get("missing"), "direction": "bullish"},
+                        "missing": ck.get("missing"), "direction": "bullish",
+                        "regime": mk.get("state"), "raw_verdict": mk.get("raw_verdict") or ck["verdict"],
+                        "rvol": vol.get("rvol")},
         })
     return out
 
@@ -160,23 +168,27 @@ def _journal(hits: list[dict]) -> int:
 
 def _grade_symbol(symbol: str, candles: list[dict], bench: dict) -> tuple[int, int]:
     """Grade every replayed hit of ``symbol`` that is not fully graded yet."""
-    from app.services import scorecard
+    from app.services import regime, scorecard
 
+    final = f"ret_{scorecard.FINAL_HORIZON}"
     rows = db.query(
         "SELECT h.id AS hit_id, h.date, h.scanner, h.symbol, h.source "
         "FROM scanner_hits h LEFT JOIN signal_outcomes o ON o.hit_id = h.id "
-        "WHERE h.symbol = ? AND h.source = 'replay' AND (o.id IS NULL OR o.ret_20 IS NULL)",
+        f"WHERE h.symbol = ? AND h.source = 'replay' AND (o.id IS NULL OR o.{final} IS NULL OR o.regime IS NULL)",
         (symbol,),
     )
+    regimes = regime.series()
     graded = complete = 0
+    batch: list[dict] = []
     for hit in rows:
-        out = scorecard.grade_hit(hit, candles, bench)
+        out = scorecard.grade_hit(hit, candles, bench, regimes)
         if out is None:
             continue
-        scorecard._upsert(out)
+        batch.append(out)
         graded += 1
-        if out.get("ret_20") is not None:
+        if out.get(final) is not None:
             complete += 1
+    scorecard._upsert_many(batch)
     return graded, complete
 
 
@@ -202,7 +214,7 @@ def run(universe: str = "EGX100", period: str = "5y", patterns: bool = True,
             "universe": uni, "period": period, "patterns": bool(patterns), "checklist": bool(checklist),
             "symbols": len(syms),
             "skipped_no_data": 0, "signals_found": 0, "new_hits": 0, "graded": 0,
-            "fully_graded_20d": 0, "by_scanner": {}, "benchmark": bench.get("source"),
+            "fully_graded_60d": 0, "by_scanner": {}, "benchmark": bench.get("source"),
         }
         job.progress(phase="replaying", done=0, total=len(syms))
         for k, sym in enumerate(syms):
@@ -223,7 +235,7 @@ def run(universe: str = "EGX100", period: str = "5y", patterns: bool = True,
             totals["new_hits"] += _journal(hits)
             g, c = _grade_symbol(sym, candles, bench)
             totals["graded"] += g
-            totals["fully_graded_20d"] += c
+            totals["fully_graded_60d"] += c
             time.sleep(0.01)
         job.progress(phase="weights", done=len(syms), detail=None)
         scorecard.invalidate_weights()
@@ -233,8 +245,8 @@ def run(universe: str = "EGX100", period: str = "5y", patterns: bool = True,
         totals["as_of"] = _now_iso()
         totals["basis"] = (
             "Each past session was scanned with the app's own entry rules (and the pattern detector "
-            "on its break day); every signal was graded by the 5/10/20-session close-to-close return "
-            "versus EGX30. Replayed rows carry source='replay', stay out of Candidates, and only set "
+            "on its break day); every signal was graded by the 5/10/20/40/60-session close-to-close return "
+            "versus EGX30 and stamped with the market regime it fired in. Replayed rows carry source='replay', stay out of Candidates, and only set "
             "weights through the proxy map in the Scorecard."
         )
         return totals
@@ -262,10 +274,14 @@ def summary() -> dict:
             "FROM scanner_hits WHERE source = 'replay' GROUP BY scanner ORDER BY n DESC"
         )
         graded = db.query(
-            "SELECT COUNT(*) AS n FROM signal_outcomes WHERE source = 'replay' AND ret_20 IS NOT NULL"
+            "SELECT COUNT(*) AS n FROM signal_outcomes WHERE source = 'replay' AND ret_60 IS NOT NULL"
+        )
+        with_regime = db.query(
+            "SELECT COUNT(*) AS n FROM signal_outcomes WHERE source = 'replay' AND regime IS NOT NULL"
         )
         return {"replayed_hits": sum(int(r["n"]) for r in rows), "by_scanner": rows,
-                "fully_graded_20d": graded[0]["n"] if graded else 0}
+                "fully_graded_60d": graded[0]["n"] if graded else 0,
+                "with_regime": with_regime[0]["n"] if with_regime else 0}
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
 

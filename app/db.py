@@ -137,6 +137,34 @@ _SCHEMA: tuple[str, ...] = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS regime_daily(
+        date TEXT PRIMARY KEY, state TEXT, index_close REAL, sma50 REAL, sma200 REAL,
+        breadth_pct REAL, breadth_members INTEGER, source TEXT, computed_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS corporate_actions(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT, type TEXT, ex_date TEXT, amount REAL, ratio REAL, note TEXT,
+        source TEXT DEFAULT 'manual', created_at TEXT,
+        UNIQUE(symbol, type, ex_date, source)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS investor_flows(
+        date TEXT, scope TEXT DEFAULT 'all',
+        net_egyptians REAL, net_arab REAL, net_foreign REAL,
+        net_individuals REAL, net_institutions REAL, net_foreign_inst REAL, total_value REAL,
+        payload_json TEXT, source TEXT DEFAULT 'paste', created_at TEXT,
+        PRIMARY KEY(date, scope)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS review_notes(
+        week_start TEXT PRIMARY KEY, text TEXT, updated_at TEXT
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS guardian_verdicts(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT, position_id INTEGER, symbol TEXT,
@@ -215,6 +243,19 @@ _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE snapshots ADD COLUMN open REAL",
     "ALTER TABLE snapshots ADD COLUMN high REAL",
     "ALTER TABLE snapshots ADD COLUMN low REAL",
+    # Longer grading horizons: swing patterns (triangles, cups, breakouts) play
+    # out over 20-60 sessions, so a 10-session verdict on them is a horizon
+    # artefact. The regime at entry lets the edge table split bull vs bear tapes.
+    "ALTER TABLE signal_outcomes ADD COLUMN ret_40 REAL",
+    "ALTER TABLE signal_outcomes ADD COLUMN bench_40 REAL",
+    "ALTER TABLE signal_outcomes ADD COLUMN excess_40 REAL",
+    "ALTER TABLE signal_outcomes ADD COLUMN ret_60 REAL",
+    "ALTER TABLE signal_outcomes ADD COLUMN bench_60 REAL",
+    "ALTER TABLE signal_outcomes ADD COLUMN excess_60 REAL",
+    "ALTER TABLE signal_outcomes ADD COLUMN regime TEXT",
+    # Relative volume (volume / 20-day median) of the session, stamped after the
+    # rule scanner has the candles cached (market.stamp_session_rvol).
+    "ALTER TABLE snapshots ADD COLUMN rvol REAL",
 )
 
 # Indexes on the hot query paths. Without these the 10-minute alert cycle
@@ -245,6 +286,7 @@ _INDEXES: tuple[str, ...] = (
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_pattern_hits_unique "
     "ON pattern_hits(date, universe, symbol, pattern)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_setups_unique ON setups(date, symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_corporate_actions_symbol ON corporate_actions(symbol, ex_date)",
 )
 
 #: Collapse pre-existing duplicate scanner_hits rows (keep the newest id) so

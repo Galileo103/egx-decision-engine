@@ -138,6 +138,18 @@ def _bbw(c: list[float], n: int = 20, k: float = 2.0) -> tuple[list[Optional[flo
     return width, upper
 
 
+def _rvol_series(v: list[float], n: int = 20) -> list[Optional[float]]:
+    """volume / median(previous n volumes) per bar; None until 10 prior bars have volume."""
+    out: list[Optional[float]] = [None] * len(v)
+    for i in range(1, len(v)):
+        window = sorted(x for x in v[max(0, i - n):i] if x > 0)
+        if len(window) < 10 or v[i] <= 0:
+            continue
+        med = window[len(window) // 2]
+        out[i] = round(v[i] / med, 2) if med > 0 else None
+    return out
+
+
 def _rolling_max(v: list[float], n: int) -> list[Optional[float]]:
     out: list[Optional[float]] = [None] * len(v)
     for i in range(n, len(v)):
@@ -168,6 +180,9 @@ class Ind:
         self.bbw, self.bb_up = _bbw(self.c)
         self.hi20 = _rolling_max(self.h, 20)
         self.vavg = _sma(self.v, 20)
+        # Relative volume vs the 20-bar MEDIAN (robust to one block-trade day);
+        # stamped on every signal so the Scorecard can split edge by volume.
+        self.rvol = _rvol_series(self.v, 20)
         self.n = len(candles)
 
 
@@ -554,6 +569,24 @@ def universe_run(universe: str = "EGX30", entry_rule: str = "squeeze_breakout", 
         avg_r = sum(t["r"] for t in pooled) / n if n else None
         beat_bh = sum(1 for r in traded if r["buy_hold_pct"] is not None and r["total_return_pct"] > r["buy_hold_pct"])
         rows.sort(key=lambda r: (r["total_return_pct"] if r["trades"] else -1e9), reverse=True)
+        # The same trades split by the market regime on their entry date, so the
+        # edge table can say "works in bull tapes, not in bear ones".
+        by_regime: dict[str, dict] = {}
+        try:
+            from app.services import regime as _regime
+
+            reg_series = _regime.series()
+            groups: dict[str, list[dict]] = {}
+            for t in pooled:
+                state = reg_series.at(str(t.get("entry_date") or ""))
+                if state:
+                    groups.setdefault(state, []).append(t)
+            for state, ts in groups.items():
+                k = len(ts)
+                by_regime[state] = {"trades": k, "win_rate": round(sum(1 for t in ts if t["pnl"] > 0) / k * 100, 1),
+                                    "avg_r": round(sum(t["r"] for t in ts) / k, 2)}
+        except Exception as exc:  # noqa: BLE001 — the split is a bonus, never a blocker
+            logger.warning("universe_run regime split failed: %s", exc)
         summary = (
             f"'{ENTRY_RULES[entry_rule]['label']}' with '{EXIT_RULES[exit_rule]['label']}' exits across {len(rows)} "
             f"{universe} stocks over {period}: it traded on {len(traded)} of them, {n} trades in total, "
@@ -567,7 +600,8 @@ def universe_run(universe: str = "EGX30", entry_rule: str = "squeeze_breakout", 
                 "rows": rows, "pooled": {"trades": n, "win_rate": round(wins / n * 100, 1) if n else None,
                                          "avg_r": round(avg_r, 2) if avg_r is not None else None,
                                          "symbols_traded": len(traded), "symbols_beat_buy_hold": beat_bh,
-                                         "median_return_pct": round(statistics.median(rets), 2) if rets else None},
+                                         "median_return_pct": round(statistics.median(rets), 2) if rets else None,
+                                         "by_regime": by_regime},
                 "skipped_no_data": skipped, "summary": summary, "elapsed_s": round(time.monotonic() - started, 1),
                 "as_of": datetime.now(CAIRO).isoformat()}
     except Exception as exc:  # noqa: BLE001

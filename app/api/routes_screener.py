@@ -151,11 +151,12 @@ class PatternsBody(BaseModel):
 @router.get("/patterns")
 async def screener_patterns(
     universe: str = Query("EGX100"), status: str | None = Query(None),
-    category: str | None = Query(None),
+    category: str | None = Query(None), view: str = Query("all"),
 ) -> dict[str, Any]:
-    """Latest stored pattern scan (post-close job); empty until the first run."""
+    """Latest stored pattern scan (post-close job); empty until the first run.
+    ``view`` = proven | not_negative | all filters by each pattern type's measured verdict."""
     try:
-        return await asyncio.to_thread(patterns.latest, universe, status, category)
+        return await asyncio.to_thread(patterns.latest, universe, status, category, view)
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
 
@@ -223,11 +224,12 @@ class LeadersBody(BaseModel):
 
 @router.get("/leaders")
 async def screener_leaders(
-    universe: str = Query("EGX100"), limit: int = Query(40)
+    universe: str = Query("EGX100"), limit: int = Query(40), sector: str | None = Query(None),
 ) -> dict[str, Any]:
-    """Latest stored relative-strength ranking (post-close job); empty until the first run."""
+    """Latest stored relative-strength ranking (post-close job); empty until the first run.
+    ``sector`` filters the stock rows to one sector key; the sector table is always included."""
     try:
-        return await asyncio.to_thread(leaders.latest, universe, limit)
+        return await asyncio.to_thread(leaders.latest, universe, limit, sector)
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
 

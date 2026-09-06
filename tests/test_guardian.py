@@ -100,7 +100,9 @@ class TestVerdicts:
 
     def test_stop_touched_when_low_pierces_but_close_recovers(self) -> None:
         # spread 12 → last low = 97 - 6 = 91 < stop 95, close 97 > stop.
-        r = _assess(_pos(), 97.0, [100.0] * 20 + [99.0, 97.0], spread=12.0)
+        # (With ATR 12 the default targets 110/120 sit inside one ATR of entry and
+        # would be flagged PLAN_INVALID first, so use targets that clear the ATR test.)
+        r = _assess(_pos(target1=130.0, target2=150.0), 97.0, [100.0] * 20 + [99.0, 97.0], spread=12.0)
         assert r["verdict"] == "STOP_TOUCHED"
         assert r["severity"] == "warning"
 
@@ -384,8 +386,9 @@ class TestPlanDefaults:
         assert pos["plan"]["score"] == 71.0  # guardian's score-at-entry anchor
         assert len(pos["auto_filled"]) == 4
         # A user-supplied value is never overwritten by the plan.
-        pos2 = portfolio.open_position("COMI", 10, 100.0, target1=105.0, note="my reason")
-        assert pos2["target1"] == 105.0 and pos2["note"] == "my reason" and pos2["stop"] == 95.0
+        # (target 115 = 3R against the plan's stop 95, so the plan-quality gate lets it through)
+        pos2 = portfolio.open_position("COMI", 10, 100.0, target1=115.0, note="my reason")
+        assert pos2["target1"] == 115.0 and pos2["note"] == "my reason" and pos2["stop"] == 95.0
 
     def test_open_position_without_stop_fails_clearly_when_plan_unavailable(self, monkeypatch) -> None:
         from app.services import portfolio, stocks
@@ -578,8 +581,9 @@ class TestPlanIntegrity:
         assert "error" in bad and "target1 6.88" in bad["error"]
         bad2 = portfolio.open_position("MENA", 100, 7.20, 6.60, target1=7.60, target2=7.50, note="x")
         assert "error" in bad2 and "target2" in bad2["error"]
-        ok = portfolio.open_position("MENA", 100, 7.20, 6.60, target1=7.53, target2=8.25, note="x")
-        assert "error" not in ok and ok["target1"] == 7.53
+        # target 8.10 = 1.5R against the 0.60 risk — the minimum the plan-quality gate accepts
+        ok = portfolio.open_position("MENA", 100, 7.20, 6.60, target1=8.10, target2=8.70, note="x")
+        assert "error" not in ok and ok["target1"] == 8.10
 
     def test_update_rejects_bad_targets_and_records_original_stop_once(self) -> None:
         from app.services import portfolio

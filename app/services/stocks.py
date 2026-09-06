@@ -10,6 +10,7 @@ per the project contract.
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Callable, List
 
@@ -208,10 +209,34 @@ def detail(symbol: str, timeframe: str = "1D") -> dict:
             "plan_checks": _plan_checks(bare, analysis, trade_plan),
             "score_history": _score_history(bare),
             "in_watchlist": _in_watchlist(bare),
+            "volume": _volume_block(bare),
             "as_of": _as_of(),
         }
     except Exception as exc:
         return {"error": str(exc)}
+
+
+def _volume_block(bare: str) -> dict | None:
+    """Relative volume of the last completed session for the header chip:
+    {rvol, volume, median_volume_20d, as_of, bucket}. None when unavailable."""
+    try:
+        from app.services import leaders
+        from app.services.pattern_common import f as _f, rvol as _rvol, rvol_bucket
+
+        candles = leaders.daily_candles(bare)
+        if len(candles) < 11:
+            return None
+        rv = _rvol(candles)
+        vols = sorted(v for v in ((_f(c.get("volume")) or 0.0) for c in candles[-21:-1]) if v > 0)
+        return {
+            "rvol": rv, "bucket": rvol_bucket(rv),
+            "volume": _f(candles[-1].get("volume")),
+            "median_volume_20d": vols[len(vols) // 2] if vols else None,
+            "as_of": str(candles[-1].get("time")),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning("volume block failed for %s: %s", bare, exc)
+        return None
 
 
 def mtf(symbol: str) -> dict:

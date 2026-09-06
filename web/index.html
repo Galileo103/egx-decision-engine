@@ -51,6 +51,21 @@
         <div id="global-strip"><div class="skeleton"><div class="sk-line" style="width:70%"></div></div></div>
       </div>
 
+      <div class="card" style="margin-bottom:14px" id="flows-card">
+        <div class="card-title"><span>Investor flows — who bought, who sold</span><span style="display:flex;gap:8px;align-items:center"><span class="as-of muted" id="flows-asof"></span><button class="btn small" id="btn-flows-paste" title="EGX publishes buy / sell / net value for Egyptians, Arabs and foreigners (individuals and institutions) after every close. The page has no feed, so copy it and paste it here.">Paste EGX page</button></span></div>
+        <div id="flows-body"><div class="skeleton"><div class="sk-line" style="width:70%"></div></div></div>
+        <div id="flows-paste" hidden style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">
+          <div class="muted" style="font-size:12px;margin-bottom:8px">Open <a href="https://www.egx.com.eg/en/InvestorsTypePieChart.aspx" target="_blank" rel="noopener">EGX → Today's market watch → Investor Type</a>, press <b>Ctrl+A</b> then <b>Ctrl+C</b> on the page, click in the box below and press <b>Ctrl+V</b>. The app reads the three tables (totals, individuals, institutions) and recomputes net as buy − sell. Leave the date empty for the last trading day.</div>
+          <div class="field"><label for="flows-text">Pasted page text</label><textarea id="flows-text" rows="6" placeholder="Egyptians  1,234,567,890  1,300,000,000  65,432,110 …" style="font-family:var(--font-mono);font-size:11.5px"></textarea></div>
+          <div class="form-row" style="margin-top:8px">
+            <div class="field" style="flex:0 0 160px"><label for="flows-date">Session date</label><input type="date" id="flows-date"></div>
+            <div class="field" style="flex:0 0 200px"><label for="flows-scope">Radio selected on EGX</label><select id="flows-scope"><option value="all">All securities &amp; bonds</option><option value="securities">Securities only</option><option value="bonds">Bonds only</option></select></div>
+            <div class="field" style="flex:0 0 auto"><label>&nbsp;</label><button class="btn small primary" id="btn-flows-save">Save session</button></div>
+            <div class="field" style="flex:1"><label>&nbsp;</label><span class="muted" id="flows-msg" style="font-size:12px"></span></div>
+          </div>
+        </div>
+      </div>
+
       <div class="grid grid-3" style="margin-bottom:14px">
         <div class="card">
           <div class="card-title"><span>Top gainers</span></div>
@@ -68,7 +83,7 @@
 
       <div class="grid grid-main" style="margin-bottom:14px">
         <div class="card" style="margin:0">
-          <div class="card-title"><span>Sector heatmap</span><span class="as-of muted" id="sectors-asof"></span></div>
+          <div class="card-title"><span>Sector heatmap</span><span style="display:flex;gap:10px;align-items:center"><a class="muted today-link" href="screener.html?tab=leaders" title="Sectors ranked by 1m/3m/6m relative strength vs EGX30, and each stock's rank inside its sector">sector strength →</a><span class="as-of muted" id="sectors-asof"></span></span></div>
           <div id="heatmap"></div>
         </div>
         <div class="card" style="margin:0">
@@ -84,6 +99,7 @@
             <span class="as-of muted" id="edge-asof"></span>
             <label class="muted" style="font-size:11px;display:flex;align-items:center;gap:4px" title="Also replay the six-pillar BUY checklist every 5 sessions, so the table can say whether a SETUP actually beats a NO SETUP (adds roughly 15 minutes)"><input type="checkbox" id="edge-replay-checklist"> include checklist</label>
             <button class="btn small" id="btn-edge-replay" title="Re-run the app's rules and pattern detector over 5 years of EGX100 history and grade every signal against EGX30 (about 25 minutes, runs in the background)">Replay history</button>
+            <button class="btn small" id="btn-edge-regrade" title="Re-grade every stored signal from five years of candles: fills the 40- and 60-session horizons and stamps the market regime (bull / neutral / bear) each signal fired in. No new detection. About 25 minutes, background.">Re-grade</button>
             <button class="btn small" id="btn-edge-refresh" title="Recompute the table from the graded history and universe backtests (a few minutes, background)">Refresh</button>
           </span>
         </div>
@@ -120,6 +136,7 @@
     renderMobileNav("dashboard");
     loadOverview();
     loadGlobal();
+    loadFlows();
     loadSectors();
     loadToday();
     loadCandidates(false);
@@ -127,9 +144,13 @@
     loadEdge();
     edgeProgress();
     document.getElementById("btn-cands-live").addEventListener("click", function () { loadCandidates(true); });
+    wireFlowsPaste();
     document.getElementById("btn-edge-replay").addEventListener("click", function () {
       startEdgeJob("/api/edge/replay", { universe: "EGX100", period: "5y", patterns: true,
                                           checklist: !!document.getElementById("edge-replay-checklist").checked }, "Replay");
+    });
+    document.getElementById("btn-edge-regrade").addEventListener("click", function () {
+      startEdgeJob("/api/edge/regrade", { only_incomplete: true }, "Re-grade");
     });
     document.getElementById("btn-edge-refresh").addEventListener("click", function () {
       startEdgeJob("/api/edge/refresh", { universe: "EGX100", period: "3y" }, "Refresh");
@@ -276,21 +297,26 @@
       var mine = {};
       held.forEach(function (s) { mine[s] = "held"; });
       (res[1] || []).forEach(function (s) { if (!mine[s]) mine[s] = "watch"; });
-      return API.get("/api/screener/patterns?universe=EGX100&status=confirmed").then(function (p) {
+      // Pattern types that did worse than a random entry on EGX history are not
+      // evidence, so the decision panel never shows them (view=not_negative).
+      return API.get("/api/screener/patterns?universe=EGX100&status=confirmed&view=not_negative").then(function (p) {
         var rows = (p && Array.isArray(p.rows) ? p.rows : []).filter(function (r) {
           return mine[String(r.symbol || "").toUpperCase()] && r.category !== "candlestick" && r.direction !== "neutral";
         });
+        // proven types first, then by quality
+        rows.sort(function (a, b) { return (b.edge_verdict === "edge") - (a.edge_verdict === "edge") || (b.quality || 0) - (a.quality || 0); });
         U.clear(patBox);
         if (!rows.length) {
-          patBox.appendChild(el("div", { class: "empty-note", text: "No confirmed chart or price-action pattern on a stock you hold or watch" + (p && p.date ? " (scan of " + p.date + ")." : ".") }));
+          patBox.appendChild(el("div", { class: "empty-note", text: "No confirmed chart or price-action pattern with a usable record on a stock you hold or watch" + (p && p.date ? " (scan of " + p.date + ")." : ".") }));
           return;
         }
         var list = el("div", { class: "today-list" });
         rows.slice(0, 8).forEach(function (r) {
-          list.appendChild(el("div", { class: "today-item", title: r.note || "" }, [
+          list.appendChild(el("div", { class: "today-item", title: (r.note || "") + (r.edge_verdict === "edge" ? " — proven type on EGX history" : (r.edge_verdict === "marginal" ? " — unproven type (coin flip on EGX history)" : "")) }, [
             symLink(r.symbol),
             el("span", { class: "badge " + (r.direction === "bullish" ? "buy" : "sell"), text: r.direction }),
             el("span", { class: "today-sub", text: r.label + (mine[r.symbol] === "watch" ? " · watchlist" : "") }),
+            r.edge_verdict === "edge" ? el("span", { class: "hit-badge", text: "proven", title: "This pattern type beat a random entry on 5y of EGX history" }) : null,
           ]));
         });
         patBox.appendChild(list);
@@ -362,6 +388,114 @@
     }).catch(function (e) {
       boxes.forEach(function (b) { U.clear(b).appendChild(U.errorBox("Market overview: " + e.message)); });
       setText("st-session-sub", "overview unavailable");
+    });
+  }
+
+  /* ---------- investor flows: who bought, who sold (pasted from EGX) ---------- */
+
+  function fmtEgp(v) {
+    var n = Number(v);
+    if (v === null || v === undefined || !isFinite(n)) return "\u2014";
+    var a = Math.abs(n), sign = n < 0 ? "\u2212" : "+";
+    if (a >= 1e9) return sign + (a / 1e9).toFixed(2) + "bn";
+    if (a >= 1e6) return sign + (a / 1e6).toFixed(0) + "m";
+    return sign + Math.round(a).toLocaleString("en-US");
+  }
+  function flowTile(label, v, tip) {
+    var has = v !== null && v !== undefined;
+    var cls = !has ? "flat" : (v < 0 ? "down" : "up");
+    return el("span", { class: "strip-item gs-item flow-item", title: tip || "" }, [
+      el("span", { class: "gs-text" }, [
+        el("span", { class: "gs-name", text: label }),
+        el("span", { class: "gs-ticker", text: has ? (v < 0 ? "net sold" : "net bought") : "no data" }),
+      ]),
+      el("span", { class: "si-val " + cls, text: fmtEgp(v) + (has ? " EGP" : "") }),
+    ]);
+  }
+  function winLine(label, w) {
+    if (!w || !w.sessions) return null;
+    function part(name, key) {
+      var v = w[key];
+      if (v === null || v === undefined) return null;
+      var neg = w[key + "_neg_sessions"];
+      return el("span", { class: "flow-part" }, [
+        el("span", { text: name + " " }),
+        el("b", { class: v < 0 ? "down" : "up", text: fmtEgp(v) }),
+        el("span", { class: "muted", text: " (sold " + neg + "/" + w.sessions + ")" }),
+      ]);
+    }
+    return el("div", { class: "flow-win" }, [
+      el("span", { class: "flow-win-label", text: label }),
+      part("Foreigners", "net_foreign"), part("Arabs", "net_arab"), part("Egyptians", "net_egyptians"),
+      part("Institutions", "net_institutions"), part("Individuals", "net_individuals"),
+    ]);
+  }
+  function flowBars(series) {
+    var rows = (series || []).slice(-40);
+    var vals = rows.map(function (r) { return Number(r.net_foreign) || 0; });
+    var mx = Math.max.apply(null, vals.map(Math.abs).concat([1]));
+    var box = el("div", { class: "flow-bars", title: "Net foreign value per session, last " + rows.length + " stored sessions (green = net buying, red = net selling)" });
+    rows.forEach(function (r, i) {
+      var v = vals[i], h = Math.max(2, Math.round(Math.abs(v) / mx * 36));
+      box.appendChild(el("span", { class: "flow-bar " + (v < 0 ? "down" : "up"), style: "height:" + h + "px",
+        title: r.date + ": foreigners " + fmtEgp(v) + " EGP" }));
+    });
+    return el("div", { class: "flow-bars-wrap" }, [el("span", { class: "gs-ticker muted", text: "Foreign net, per session" }), box]);
+  }
+  function loadFlows() {
+    var box = document.getElementById("flows-body");
+    U.load(box, function () { return API.get("/api/flows"); }, function (c, s) {
+      var asof = document.getElementById("flows-asof");
+      asof.textContent = s.latest && s.latest.date ? "session " + s.latest.date + " \u00b7 " + s.stored + " stored" : "";
+      if (!s.stored) {
+        c.appendChild(el("div", { class: "muted", style: "font-size:12.5px", text: s.reading || "No investor-type data yet." }));
+        return;
+      }
+      var L = s.latest;
+      c.appendChild(el("div", { class: "strip" }, [
+        flowTile("Foreigners", L.net_foreign, "Non-Arab foreigners, individuals + institutions. The flow that moves EGX30 most."),
+        flowTile("Arabs", L.net_arab, "Arab investors (Gulf money), individuals + institutions."),
+        flowTile("Egyptians", L.net_egyptians, "Egyptian investors, individuals + institutions. Always the mirror of the other two."),
+        flowTile("Institutions", L.net_institutions, "All institutions, every nationality — the informed side."),
+        flowTile("Individuals", L.net_individuals, "All individuals, every nationality — retail."),
+      ]));
+      // One stored session has nothing to sum; the 20-line only earns its place once it differs from the 5-line.
+      var w5 = s.windows["5"] || {}, w20 = s.windows["20"] || {};
+      var wins = el("div", { class: "flow-windows" }, [
+        w5.sessions >= 2 ? winLine("Last " + w5.sessions + " sessions", w5) : null,
+        w20.sessions > 5 ? winLine("Last " + w20.sessions + " sessions", w20) : null,
+      ]);
+      if (wins.childNodes.length) c.appendChild(wins);
+      if (s.series && s.series.length > 1) c.appendChild(flowBars(s.series));
+      c.appendChild(el("div", { class: "flow-reading", text: s.reading || "" }));
+      var rm = el("a", { href: "#", class: "muted flow-remove", text: "remove session " + L.date });
+      rm.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        if (!window.confirm("Remove the stored flows for " + L.date + "? You can paste it again afterwards.")) return;
+        API.del("/api/flows/" + encodeURIComponent(L.date)).then(function () { toast("Removed " + L.date + ".", "success"); loadFlows(); })
+          .catch(function (e) { toast("Remove failed: " + e.message, "error"); });
+      });
+      c.appendChild(el("div", { style: "margin-top:6px;font-size:11px" }, [rm]));
+    });
+  }
+  function wireFlowsPaste() {
+    var panel = document.getElementById("flows-paste"), btn = document.getElementById("btn-flows-paste");
+    var msg = document.getElementById("flows-msg"), text = document.getElementById("flows-text");
+    btn.addEventListener("click", function () { panel.hidden = !panel.hidden; if (!panel.hidden) text.focus(); });
+    document.getElementById("btn-flows-save").addEventListener("click", function () {
+      var body = { text: text.value, date: document.getElementById("flows-date").value || null,
+                   scope: document.getElementById("flows-scope").value };
+      if (!body.text.trim()) { msg.textContent = "Paste the page text first."; return; }
+      msg.textContent = "Reading\u2026";
+      API.post("/api/flows/paste", body).then(function (res) {
+        var warn = (res.warnings || []).length ? " Warnings: " + res.warnings.join(" ") : "";
+        msg.textContent = "Saved " + res.date + ": foreigners " + fmtEgp(res.net_foreign) + ", institutions " + fmtEgp(res.net_institutions) + " EGP." + warn;
+        toast("Investor flows saved for " + res.date + ".", "success");
+        text.value = "";
+        loadFlows();
+      }).catch(function (e) {
+        msg.textContent = "Could not read the paste: " + e.message + " Make sure you copied the whole page (Ctrl+A, Ctrl+C) with the three tables.";
+      });
     });
   }
 
@@ -539,6 +673,11 @@
         (Array.isArray(scanners) ? scanners : (typeof scanners === "string" ? [scanners] : [])).forEach(function (s) {
           badges.appendChild(el("span", { class: "hit-badge", text: String(s) }));
         });
+        var rv = U.toNum(r.rvol);
+        if (rv !== null) {
+          badges.appendChild(el("span", { class: "badge " + (rv >= 1.5 ? "up" : (rv < 0.7 ? "sell" : "neutral")), style: { marginLeft: "4px", fontSize: "10px" }, text: "RVOL " + fmtNum(rv, 1) + "×",
+            title: "Relative volume on the signal day (volume / 20-day median). Heavy = at least 1.5x. Where the record shows heavy-volume signals do better, the ranking weight is multiplied accordingly." }));
+        }
         tbody.appendChild(el("tr", {
           style: { cursor: "pointer" },
           onclick: function () { window.location.href = "stock.html?symbol=" + encodeURIComponent(sym); },
@@ -574,6 +713,28 @@
     U.load(box, function () { return API.get("/api/edge"); }, function (c, data) {
       setText("edge-asof", data.as_of ? "computed " + String(data.as_of).slice(0, 16).replace("T", " ") : "never computed");
       if (data.headline) c.appendChild(el("div", { class: "empty-note", style: { fontSize: "13px" }, text: data.headline }));
+      // Regime: which tape are we in, and which signals only work in a bull tape.
+      var rg = data.regime || null;
+      if (rg && rg.current && rg.current.state) {
+        var rst = rg.current.state;
+        var rgLine = el("div", { class: "empty-note", style: { fontSize: "12.5px" } }, [
+          el("span", { class: "badge " + (rst === "bull" ? "up" : (rst === "bear" ? "sell" : "neutral")), text: (rst === "bull" ? "Bull tape" : (rst === "bear" ? "Bear tape" : "Mixed tape")) + (rg.current.stale ? " (as of " + rg.current.date + ")" : "") }),
+          el("span", { text: " " + (rg.current.text || "") }),
+        ]);
+        c.appendChild(rgLine);
+        if (rg.measured && rg.bull_only && rg.bull_only.length) {
+          c.appendChild(el("div", { class: "empty-note", style: { fontSize: "12px" }, text: "Bull-tape only (edge in bull, none in bear): " + rg.bull_only.slice(0, 8).map(function (f) { return f.label; }).join(", ") + (rg.bull_only.length > 8 ? " +" + (rg.bull_only.length - 8) + " more" : "") + "." }));
+        } else if (!rg.measured) {
+          c.appendChild(el("div", { class: "empty-note", style: { fontSize: "12px" }, text: "Bull/bear split not measured yet — press Re-grade, then Refresh." }));
+        }
+      }
+      var vb = data.volume || null;
+      if (vb && vb.measured) {
+        var vm = vb.volume_matters || [];
+        c.appendChild(el("div", { class: "empty-note", style: { fontSize: "12px" }, text: vm.length
+          ? "Volume matters for: " + vm.slice(0, 8).map(function (f) { return f.label + " (heavy " + (f.heavy >= 0 ? "+" : "") + fmtNum(f.heavy, 1) + "% vs quiet " + (f.quiet >= 0 ? "+" : "") + fmtNum(f.quiet, 1) + "%)"; }).join(", ") + " — wait for a heavy-volume day on these."
+          : "Volume split measured: no signal shows a heavy-volume edge that quiet days lack." }));
+      }
       if (data.checklist) {
         var ck = data.checklist;
         c.appendChild(el("div", { class: "empty-note", style: { fontSize: "12.5px" } }, [
@@ -596,10 +757,20 @@
         var vsRandom = (r.extra && r.extra.rate_vs_random_pp !== undefined && r.extra.rate_vs_random_pp !== null)
           ? (r.extra.rate_vs_random_pp >= 0 ? "+" : "") + fmtNum(r.extra.rate_vs_random_pp, 1) + " pp" : "—";
         var dir = r.extra && r.extra.direction;
+        var horizon = r.extra && r.extra.horizon ? r.extra.horizon + "d" : "";
+        var br = (r.extra && r.extra.by_regime) || {};
+        function regimeCell(state) {
+          var v = br[state];
+          if (!v || v.n === null || v.n === undefined || v.edge_metric === null || v.edge_metric === undefined) return el("td", { class: "num muted", text: "—" });
+          var txt = (v.edge_metric >= 0 ? "+" : "") + fmtNum(v.edge_metric, 2) + (r.kind === "rule" ? "R" : "%");
+          var cls = v.verdict === "edge" ? "up" : (v.verdict === "negative" ? "sell" : (v.verdict === "marginal" ? "neutral" : ""));
+          return el("td", { class: "num" }, [el("span", { class: cls ? "badge " + cls : "muted", text: txt, title: state + " tape: " + v.n + " samples, verdict " + (v.verdict || "—") })]);
+        }
         tbody.appendChild(el("tr", {}, [
           el("td", {}, [
             el("span", { text: r.label || r.name, title: r.name }),
             el("span", { class: "hit-badge", text: EDGE_KIND_LABEL[r.kind] || r.kind, style: { marginLeft: "6px" } }),
+            horizon ? el("span", { class: "hit-badge", text: horizon, title: "Reference horizon this signal is judged at", style: { marginLeft: "4px" } }) : null,
             dir === "bearish" ? el("span", { class: "hit-badge", text: "bearish", title: "Graded on the stock falling", style: { marginLeft: "4px" } }) : null,
             (r.extra && r.extra.sources && r.extra.sources.replay) ? el("span", { class: "hit-badge", text: "replay", title: "Measured on replayed history", style: { marginLeft: "4px" } }) : null,
           ]),
@@ -607,6 +778,7 @@
           el("td", { class: "num", text: r.hit_rate === null || r.hit_rate === undefined ? "—" : fmtNum(r.hit_rate, 0) + "%" }),
           el("td", { class: "num", text: vsRandom, title: "Right-way rate minus what a random entry achieves over the same window" }),
           el("td", { class: "num", text: metric, title: r.metric_label || "" }),
+          regimeCell("bull"), regimeCell("bear"),
           el("td", {}, [el("span", { class: "badge " + (EDGE_VERDICT_CLASS[r.verdict] || ""), text: r.verdict_text || r.verdict, title: basis })]),
         ]));
       });
@@ -615,6 +787,8 @@
           el("th", { text: "Rule / signal" }), el("th", { class: "num", text: "Samples" }),
           el("th", { class: "num", text: "Win / right %" }), el("th", { class: "num", text: "vs random" }),
           el("th", { class: "num", text: "Avg R / excess" }),
+          el("th", { class: "num", text: "Bull tape", title: "Same measure, signals fired in a bull regime only" }),
+          el("th", { class: "num", text: "Bear tape", title: "Same measure, signals fired in a bear regime only" }),
           el("th", { text: "Verdict" }),
         ])),
         tbody,
@@ -630,22 +804,26 @@
   function edgeProgress() {
     var line = document.getElementById("edge-progress");
     API.get("/api/edge/status").then(function (s) {
-      var r = s.replay || {}, e = s.edge || {};
-      var running = r.running || e.running;
+      var r = s.replay || {}, e = s.edge || {}, g = s.regrade || {};
+      var running = r.running || e.running || g.running;
       var txt = "";
       if (r.running) {
         txt = "Replaying history… " + (r.done || 0) + " / " + (r.total || "?") + " stocks" + (r.detail ? " (" + r.detail + ")" : "")
           + (r.elapsed_s ? " · " + Math.round(r.elapsed_s / 60) + " min" : "");
+      } else if (g.running) {
+        txt = "Re-grading… " + (g.phase || "") + (g.total ? " " + (g.done || 0) + " / " + g.total + " stocks" : "") + (g.detail ? " (" + g.detail + ")" : "")
+          + (g.elapsed_s ? " · " + Math.round(g.elapsed_s / 60) + " min" : "");
       } else if (e.running) {
         txt = "Recomputing edge table… " + (e.phase || "") + (e.detail ? " (" + e.detail + ")" : "");
       } else if (edgePollTimer) {
-        var err = r.error || e.error;
+        var err = r.error || e.error || g.error;
         txt = err ? "Background job failed: " + err : "Done.";
         if (!err) { loadEdge(); }
       }
       line.hidden = !txt;
       line.textContent = txt;
       document.getElementById("btn-edge-replay").disabled = !!running;
+      document.getElementById("btn-edge-regrade").disabled = !!running;
       document.getElementById("btn-edge-refresh").disabled = !!running;
       if (running) {
         edgePollTimer = setTimeout(edgeProgress, 5000);

@@ -104,6 +104,11 @@ def _column(symbol: str, weights: dict[str, float], edge: dict[str, dict], held:
         rs = leaders._symbol_metrics(symbol, leaders.benchmark_series())
     except Exception:  # noqa: BLE001
         rs = None
+    col["rvol"] = ck.get("rvol")
+    try:
+        col["sector_rs"] = leaders.sector_context(symbol)
+    except Exception:  # noqa: BLE001
+        col["sector_rs"] = None
     col["rs"] = ({"excess_1m": rs.get("excess_1m"), "excess_3m": rs.get("excess_3m"),
                   "pct_from_52w_high": rs.get("pct_from_52w_high"), "new_high": rs.get("new_high"),
                   "median_value_20d": rs.get("median_value_20d")} if rs else None)

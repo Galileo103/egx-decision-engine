@@ -545,8 +545,36 @@ def decisive_level(rows: list[dict], atr: float) -> Optional[dict]:
             "directions": sorted({r["direction"] for r in at_level})}
 
 
-def detect(symbol: str, candles_in: Optional[list[dict]] = None) -> dict:
-    """All patterns currently visible on one symbol's daily chart."""
+def _edges() -> dict[str, dict]:
+    """Measured verdict per pattern key (Proven-edge table); {} when unavailable."""
+    try:
+        from app.services import edge
+
+        return edge.pattern_edges()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pattern edges unavailable: %s", exc)
+        return {}
+
+
+def _hidden_counts(rows: list[dict], kept: list[dict]) -> dict[str, int]:
+    """How many rows a view hid, by verdict — so the UI can say '7 unproven hidden'."""
+    kept_ids = {id(r) for r in kept}
+    out: dict[str, int] = {}
+    for r in rows:
+        if id(r) not in kept_ids:
+            v = str(r.get("edge_verdict") or "unmeasured")
+            out[v] = out.get(v, 0) + 1
+    return out
+
+
+def detect(symbol: str, candles_in: Optional[list[dict]] = None, view: str = "all") -> dict:
+    """All patterns currently visible on one symbol's daily chart.
+
+    ``view`` ('proven' | 'not_negative' | 'all') filters by each pattern type's
+    measured verdict BEFORE events are clustered and the decisive level is
+    chosen, so the counts, the events and the level all describe what is shown.
+    Hidden rows are counted in ``hidden`` / ``hidden_by_verdict``.
+    """
     try:
         sym = str(symbol or "").upper().strip().split(":")[-1]
         candles: list[dict]
@@ -603,18 +631,46 @@ def detect(symbol: str, candles_in: Optional[list[dict]] = None) -> dict:
         for r in weekly.structure_rows(candles):
             r["symbol"] = sym
             found.append(r)
-        from app.services.pattern_catalog import enrich
+        from app.services.pattern_catalog import enrich, passes_view
 
-        found = [enrich(r) for r in found]
+        edges = _edges()
+        found = [enrich(r, edges) for r in found]
+        # Relative volume on the pattern's trigger bar (break day) or, while it is
+        # still forming, on the last bar — the number that decides breakout quality.
+        from app.services.pattern_common import rvol as _rvol
+
+        date_index = {str(c.get("time")): k for k, c in enumerate(candles)}
+        last_rvol = _rvol(candles)
+        for r in found:
+            brk = date_index.get(str(r.get("break_date"))) if r.get("break_date") else None
+            r["rvol"] = _rvol(candles, brk) if brk is not None else last_rvol
         # Drop confirmed shapes whose measured move is already complete.
         found = [r for r in found if not (
             r.get("status") == "confirmed" and r.get("move_progress_pct") is not None
             and r["move_progress_pct"] >= 100.0)]
+        # Corporate actions: a trigger bar that is an ex-dividend / split gap is not a
+        # market decision — tag it so the card says so and the checklist ignores it.
+        try:
+            from app.services import corporate_actions
+
+            corporate_actions.tag_suspect(sym, found)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("suspect tagging failed for %s: %s", sym, exc)
+        all_rows = found
+        # The measured-verdict view: a pattern type that did worse than a random
+        # entry on five years of EGX history is not evidence, so by default it is
+        # not on the card. Filter BEFORE clustering so counts match what is shown.
+        found = [r for r in found if passes_view(r, view)]
         found.sort(key=lambda r: (r["status"] == "confirmed", r["quality"]), reverse=True)
         events = cluster_events(found, atr, candles)
         heads = [r for r in found if r.get("event_headline")]
         return {"symbol": sym, "patterns": found, "atr14": round(atr, 4),
                 "as_of": str(candles[-1].get("time")), "bars": len(candles),
+                "view": view if view in ("proven", "not_negative", "all") else "all",
+                "total": len(all_rows), "hidden": len(all_rows) - len(found),
+                "hidden_by_verdict": _hidden_counts(all_rows, found),
+                "by_verdict": _count_by(all_rows, "edge_verdict"),
+                "edge_measured": bool(edges),
                 "by_category": _count_by(found, "category"),
                 "by_direction": _count_by(found, "direction"),
                 "events": events, "distinct_events": len(events),
@@ -690,15 +746,22 @@ def _persist(date: str, uni: str, rows: list[dict]) -> None:
             "INSERT OR IGNORE INTO scanner_hits (date, scanner, symbol, payload_json, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
             [(date, f"pattern_{r['pattern']}", r["symbol"],
-              json.dumps({k: r[k] for k in ("neckline", "target", "quality", "break_date", "direction")}),
+              json.dumps({k: r.get(k) for k in ("neckline", "target", "quality", "break_date", "direction", "rvol")}),
               _now_iso()) for r in confirmed],
         )
 
 
 def latest(universe: str = "EGX100", status: Optional[str] = None,
-           category: Optional[str] = None) -> dict:
-    """Most recently stored scan (fast path for the UI)."""
+           category: Optional[str] = None, view: str = "all") -> dict:
+    """Most recently stored scan (fast path for the UI).
+
+    Rows are re-stamped with the CURRENT measured verdict at read time (the
+    stored payload may predate the last edge refresh); ``view`` filters like
+    ``detect`` and ``hidden_by_verdict`` says what was left out.
+    """
     try:
+        from app.services.pattern_catalog import attach_edge, passes_view
+
         uni = (universe or "EGX100").upper()
         d = db.query("SELECT MAX(date) AS d FROM pattern_hits WHERE universe = ?", (uni,))
         date = d[0].get("d") if d else None
@@ -713,13 +776,19 @@ def latest(universe: str = "EGX100", status: Optional[str] = None,
             sql += " AND category = ?"
             params.append(category)
         sql += " ORDER BY (status = 'confirmed') DESC, quality DESC"
-        rows = []
+        edges = _edges()
+        all_rows = []
         for r in db.query(sql, params):
             try:
-                rows.append(json.loads(r["payload_json"]))
+                all_rows.append(attach_edge(json.loads(r["payload_json"]), edges))
             except (TypeError, ValueError):
                 continue
+        rows = [r for r in all_rows if passes_view(r, view)]
         return {"rows": rows, "universe": uni, "date": date, "stored": True,
+                "view": view if view in ("proven", "not_negative", "all") else "all",
+                "total": len(all_rows), "hidden": len(all_rows) - len(rows),
+                "hidden_by_verdict": _hidden_counts(all_rows, rows),
+                "by_verdict": _count_by(all_rows, "edge_verdict"), "edge_measured": bool(edges),
                 "found": len(rows), "confirmed": sum(1 for r in rows if r["status"] == "confirmed"),
                 "by_category": _count_by(rows, "category")}
     except Exception as exc:  # noqa: BLE001
@@ -741,11 +810,36 @@ def catalog() -> dict:
                     stats[name] = {"graded": sc.get("hits_graded"), "n_10d": h10.get("n"),
                                    "win_rate_10d": h10.get("win_rate"), "beat_rate_10d": h10.get("beat_rate"),
                                    "avg_excess_10d": h10.get("avg_excess"), "weight": sc.get("weight")}
+        # The measured verdict per pattern type, at its reference horizon and at
+        # every horizon — the column that decides what the UI shows by default.
+        edges = _edges()
+        for key, e in edges.items():
+            st = stats.setdefault(f"pattern_{key}", {})
+            st.update({"verdict": e.get("verdict"), "horizon": e.get("horizon"), "n": e.get("n"),
+                       "hit_rate": e.get("hit_rate"), "edge_metric": e.get("edge_metric"),
+                       "rate_vs_random_pp": e.get("rate_vs_random_pp"),
+                       "excess_vs_random": e.get("excess_vs_random"),
+                       "verdict_by_horizon": {h: (v or {}).get("verdict") for h, v in (e.get("horizons") or {}).items()},
+                       "excess_by_horizon": {h: (v or {}).get("avg_excess") for h, v in (e.get("horizons") or {}).items()},
+                       "by_regime": {s: {"verdict": (v or {}).get("verdict"), "n": (v or {}).get("n"),
+                                         "edge_metric": (v or {}).get("edge_metric")}
+                                     for s, v in (e.get("by_regime") or {}).items()}})
         rows = _catalog(stats)
+        for r in rows:
+            v = ((r.get("egx_stats") or {}).get("verdict")) or "unmeasured"
+            r["edge_verdict"] = "unmeasured" if v == "too_few" else v
+            r["proven"] = r["edge_verdict"] == "edge"
+        by_verdict = _count_by(rows, "edge_verdict")
         return {"patterns": rows, "categories": CATEGORIES, "count": len(rows),
                 "detected": sum(1 for r in rows if r["detected"]),
+                "by_verdict": by_verdict, "edge_measured": bool(edges),
+                "proven": [r["key"] for r in rows if r["proven"]],
+                "negative": [r["key"] for r in rows if r["edge_verdict"] == "negative"],
                 "basis": ("Reliability/frequency tiers are qualitative priors from the classic Western "
                           "references (Bulkowski, Nison, Wyckoff practice). egx_stats are the app's own "
-                          "Scorecard grades of CONFIRMED detections on EGX — the numbers that matter here.")}
+                          "Scorecard grades of CONFIRMED detections on EGX — the numbers that matter here. "
+                          "The verdict (edge / marginal / negative / unmeasured) comes from the Proven-edge "
+                          "table at each pattern's reference horizon (candlesticks 10 sessions, price-action "
+                          "events 20, chart shapes 40); 'Proven only' views show edge patterns alone.")}
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}

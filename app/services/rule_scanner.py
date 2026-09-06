@@ -94,6 +94,7 @@ def rule_hits_last_bar(symbol: str, candles: list[dict]) -> list[dict]:
             "price": round(x.c[i], 4),
             "change_pct": round((x.c[i] / prev - 1.0) * 100.0, 2) if prev else None,
             "volume_ratio": round(x.v[i] / vavg, 2) if vavg else None,
+            "rvol": x.rvol[i],
             "atr14": round(atr_i, 4) if atr_i is not None else None,
             "sma50": round(sma50_i, 4) if sma50_i is not None else None,
             "median_value_20d": round(median_value, 0) if median_value else None,
@@ -109,7 +110,7 @@ def _persist(rows: list[dict]) -> int:
         "INSERT OR REPLACE INTO scanner_hits (date, scanner, symbol, payload_json, created_at, source) "
         "VALUES (?, ?, ?, ?, ?, 'live')",
         [(r["date"], r["scanner"], r["symbol"],
-          json.dumps({k: r.get(k) for k in ("price", "change_pct", "volume_ratio", "atr14", "sma50",
+          json.dumps({k: r.get(k) for k in ("price", "change_pct", "volume_ratio", "rvol", "atr14", "sma50",
                                             "median_value_20d", "rule")}, default=str), now) for r in rows],
     )
 

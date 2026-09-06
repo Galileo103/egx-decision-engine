@@ -196,6 +196,26 @@ def _post_close_body() -> dict:
                         if isinstance(rules, dict) and "error" not in rules else rules)
     except Exception as exc:
         out["rules"] = {"error": str(exc)}
+    # Relative volume for the session's snapshot rows (cheap: the rule scanner
+    # just cached every stock's candles).
+    try:
+        from app.services import market as _market
+
+        out["rvol"] = _market.stamp_session_rvol()
+    except Exception as exc:
+        out["rvol"] = {"error": str(exc)}
+    # Market regime — after the rule scanner (whose sweep leaves every stock's
+    # candles cached, so breadth is cheap) and before Candidates / setups, which
+    # read today's state for regime-conditional weights and the checklist gate.
+    try:
+        from app.services import regime
+
+        reg = regime.update_today()
+        out["regime"] = ({"rows": reg.get("rows"), "state": (reg.get("latest") or {}).get("state"),
+                          "breadth_pct": (reg.get("latest") or {}).get("breadth_pct"), "elapsed_s": reg.get("elapsed_s")}
+                         if isinstance(reg, dict) and "error" not in reg else reg)
+    except Exception as exc:
+        out["regime"] = {"error": str(exc)}
     try:
         from app.services import screeners
 
@@ -316,6 +336,17 @@ def _job_weekly_maintenance() -> dict:
         }
     except Exception as exc:
         out["pruned"] = {"error": str(exc)}
+
+    # 1a. Weekly review digest — one Telegram message with the week's numbers
+    # (closed trades, R vs the system, unacted Guardian verdicts). Saturday is
+    # the review day; the page is where the lesson gets written.
+    try:
+        from app.services import review
+
+        dg = review.digest(send=True)
+        out["review_digest"] = {k: dg.get(k) for k in ("sent", "week", "error")}
+    except Exception as exc:
+        out["review_digest"] = {"error": str(exc)}
 
     # 1b. Proven-edge table: recompute weekly so the dashboard card never
     #     shows stale verdicts (universe backtests, minutes — Saturday is fine).

@@ -8,7 +8,7 @@ from typing import Any, Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.services import edge, replay
+from app.services import edge, replay, scorecard
 
 router = APIRouter(prefix="/api/edge", tags=["edge"])
 
@@ -46,7 +46,22 @@ async def edge_refresh(body: RefreshBody) -> dict[str, Any]:
 
 @router.get("/status")
 async def edge_status() -> dict[str, Any]:
-    return {"edge": edge.status(), "replay": replay.status()}
+    return {"edge": edge.status(), "replay": replay.status(), "regrade": scorecard.regrade_status()}
+
+
+class RegradeBody(BaseModel):
+    source: Optional[str] = None       # 'replay' | 'live' | None = both
+    only_incomplete: bool = True       # False re-grades every stored outcome
+
+
+@router.post("/regrade")
+async def regrade_start(body: RegradeBody) -> dict[str, Any]:
+    """Re-grade stored outcomes in the background: fills the 40/60-session columns
+    and the regime stamp without re-running detection. Poll /status."""
+    try:
+        return scorecard.start_regrade(body.source, body.only_incomplete)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
 
 
 @router.post("/replay")

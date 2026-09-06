@@ -90,6 +90,14 @@ class Settings:
         # Sessions held inside +/-0.5R before the time-stop advice fires.
         self.guardian_time_stop_bars: int = _env_int("GUARDIAN_TIME_STOP_BARS", 15)
 
+        # Plan-quality gate at the point of commitment (TA roadmap Task 3).
+        # A recorded target 1 must pay at least MIN_RR_T1 times the initial risk
+        # and sit at least MIN_TARGET_ATR ATR14 above entry — otherwise the
+        # Guardian celebrates noise as "target hit" (CLHO 2026-09-06: T1 0.3%
+        # above entry against a 4.4% stop). Overridable with allow_override.
+        self.min_rr_t1: float = _env_float("MIN_RR_T1", 1.5)
+        self.min_target_atr: float = _env_float("MIN_TARGET_ATR", 1.0)
+
         # Ensure the database directory exists so sqlite can create the file.
         try:
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)

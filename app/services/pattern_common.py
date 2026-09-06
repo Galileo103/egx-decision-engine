@@ -54,6 +54,46 @@ def vol_ratio(candles: list[dict], idx: int, lookback: int = 20) -> Optional[flo
     return round(v / (sum(vols) / len(vols)), 2)
 
 
+#: Relative-volume buckets used by the Scorecard / Proven-edge split and the
+#: Candidates weighting. Boundaries in multiples of the 20-day MEDIAN volume.
+RVOL_BUCKETS: tuple[str, ...] = ("lt1", "1_1.5", "ge1.5")
+RVOL_LABELS: dict[str, str] = {"lt1": "quiet (< 1×)", "1_1.5": "normal (1–1.5×)", "ge1.5": "heavy (≥ 1.5×)"}
+
+
+def rvol(candles: list[dict], idx: Optional[int] = None, lookback: int = 20) -> Optional[float]:
+    """Relative volume of bar ``idx`` (default: the last bar): volume divided by
+    the MEDIAN volume of the ``lookback`` bars before it.
+
+    The median, not the mean: one block trade or a rights-issue day doubles a
+    20-day average for a month and hides every real surge behind it, while
+    the median barely moves. Needs at least 10 prior bars with volume;
+    returns None otherwise (never 0 or 1 as a stand-in).
+    """
+    if not candles:
+        return None
+    i = len(candles) - 1 if idx is None else (idx if idx >= 0 else len(candles) + idx)
+    if i <= 0 or i >= len(candles):
+        return None
+    vols = sorted(v for v in ((f(c.get("volume")) or 0.0) for c in candles[max(0, i - lookback):i]) if v > 0)
+    v = f(candles[i].get("volume"))
+    if v is None or len(vols) < 10:
+        return None
+    med = vols[len(vols) // 2]
+    return round(v / med, 2) if med > 0 else None
+
+
+def rvol_bucket(value: Optional[float]) -> Optional[str]:
+    """Bucket key for a relative-volume value (None when unknown)."""
+    v = f(value)
+    if v is None:
+        return None
+    if v < 1.0:
+        return "lt1"
+    if v < 1.5:
+        return "1_1.5"
+    return "ge1.5"
+
+
 def sma(values: list[float], n: int, idx: Optional[int] = None) -> Optional[float]:
     end = len(values) if idx is None else idx + 1
     if end < n or n <= 0:

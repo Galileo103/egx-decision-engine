@@ -96,6 +96,35 @@
         <h2>Fired alerts</h2>
         <div id="firedBox"></div>
       </section>
+
+      <section class="pg-panel">
+        <h2>Corporate actions — ex-dates, splits, rights</h2>
+        <div class="pg-muted" style="font-size:12.5px;margin-bottom:8px">
+          The calendar the charts do not know. Dividends and splits arrive from Yahoo with the daily bars; anything else
+          (upcoming ex-dates, rights issues, capital increases, bonus shares) you record here from the EGX announcement.
+          The Guardian warns <b>EX DATE SOON</b> on a held stock, the checklist's Risk pillar warns, the chart marks the
+          day, and a pattern whose trigger bar is an event gap is tagged <b>event gap</b> and ignored as evidence.
+        </div>
+        <form class="pg-form" id="caForm">
+          <label class="pg-field">Symbol <input id="caSymbol" type="text" placeholder="COMI" autocomplete="off" required></label>
+          <label class="pg-field">Type
+            <select id="caType">
+              <option value="dividend">dividend (ex-date)</option>
+              <option value="rights">rights issue</option>
+              <option value="capital_increase">capital increase</option>
+              <option value="bonus">bonus shares</option>
+              <option value="split">split</option>
+              <option value="other">other</option>
+            </select>
+          </label>
+          <label class="pg-field">Ex-date <input id="caDate" type="date" required></label>
+          <label class="pg-field">Amount (EGP) <input id="caAmount" type="number" step="any" min="0" placeholder="dividend per share"></label>
+          <label class="pg-field">Ratio <input id="caRatio" type="number" step="any" min="0" placeholder="e.g. 0.5 = 1 new per 2"></label>
+          <label class="pg-field">Note <input id="caNote" type="text" placeholder="source / details"></label>
+          <button type="submit" class="pg-btn" id="caBtn">Record event</button>
+        </form>
+        <div id="caBox" style="margin-top:10px"></div>
+      </section>
     </main>
     <footer class="pg-footer">Analysis tooling — not financial advice. Data delayed ~15 min.</footer>
   </div>
@@ -518,8 +547,24 @@
     var body = { target1: parts[0] };
     if (parts.length > 1) body.target2 = parts[1];
     try {
-      await PG.api('post', '/api/portfolio/positions/' + encodeURIComponent(row.id) + '/update', body);
+      var res;
+      try {
+        res = await PG.api('post', '/api/portfolio/positions/' + encodeURIComponent(row.id) + '/update', body);
+      } catch (err) {
+        // Plan-quality gate: a target under the minimum R:R or inside one ATR is
+        // refused; the user may record it anyway with an explicit override.
+        var msg = err && err.message ? String(err.message) : '';
+        if (msg.indexOf('BLOCKED') !== 0) throw err;
+        if (!window.confirm(msg + "\n\nRecord these targets anyway? (The override is written into the position's warnings.)")) {
+          PG.notify('Targets unchanged (plan-quality gate).', 'info');
+          return;
+        }
+        body.allow_override = true;
+        res = await PG.api('post', '/api/portfolio/positions/' + encodeURIComponent(row.id) + '/update', body);
+      }
       PG.notify('Targets for ' + row.symbol + ' updated', 'success');
+      var warns = res && typeof res === 'object' ? res.risk_warnings : null;
+      if (Array.isArray(warns)) warns.forEach(function (w) { PG.notify('⚠ ' + w, 'error'); });
       refreshPortfolio();
     } catch (e) {
       PG.notify('Targets update failed: ' + (e && e.message ? e.message : e), 'error');
@@ -610,6 +655,7 @@
         + (entry !== null && isFinite(entry) ? '?entry=' + encodeURIComponent(entry) : ''));
       if (seq !== planReq) return;  // a newer request superseded this one
       setAuto('pStop', d.stop); setAuto('pT1', d.target1); setAuto('pT2', d.target2); setAuto('pNote', d.note);
+      previewPlanQuality();
       var bits = [];
       if (d.stop !== null && d.stop !== undefined) bits.push('stop ' + PG.num(d.stop) + ' (' + (d.source || 'plan') + ')');
       if (d.target1 !== null && d.target1 !== undefined) bits.push('T1 ' + PG.num(d.target1));
@@ -624,6 +670,50 @@
       if (seq !== planReq) return;
       hint.textContent = 'Could not load a trade plan for ' + symbol + ' (' + (e && e.message ? e.message : e)
         + '). Enter the stop yourself.';
+    }
+  }
+
+  // Plan-quality preview: the same gate the ledger applies (R:R to target 1 and
+  // ATR distance), shown while you type so a noise-level target is caught before
+  // the block, not after. Writes into the form-message line under the plan hint.
+  var pqReq = 0;
+  var PQ_CFG = { min_rr_t1: 1.5, min_target_atr: 1.0 };
+  PG.api('get', '/api/portfolio/config').then(function (c) {
+    if (c && c.min_rr_t1) PQ_CFG.min_rr_t1 = Number(c.min_rr_t1);
+    if (c && c.min_target_atr) PQ_CFG.min_target_atr = Number(c.min_target_atr);
+  }).catch(function () {});
+
+  async function previewPlanQuality() {
+    var box = $('posFormMsg');
+    var symbol = String($('pSymbol').value || '').replace(/^EGX:/i, '').trim().toUpperCase();
+    var entry = Number($('pEntry').value), stop = $('pStop').value === '' ? null : Number($('pStop').value);
+    var t1 = $('pT1').value === '' ? null : Number($('pT1').value);
+    var t2 = $('pT2').value === '' ? null : Number($('pT2').value);
+    if (!isFinite(entry) || entry <= 0 || (t1 === null && t2 === null)) { box.textContent = ''; box.className = 'pg-muted'; return; }
+    var seq = ++pqReq;
+    try {
+      var q = await PG.api('get', '/api/portfolio/plan-quality?entry=' + encodeURIComponent(entry)
+        + (stop !== null && isFinite(stop) ? '&stop=' + encodeURIComponent(stop) : '')
+        + (t1 !== null && isFinite(t1) ? '&target1=' + encodeURIComponent(t1) : '')
+        + (t2 !== null && isFinite(t2) ? '&target2=' + encodeURIComponent(t2) : '')
+        + (symbol ? '&symbol=' + encodeURIComponent(symbol) : ''));
+      if (seq !== pqReq) return;
+      if (!q || q.error) { box.textContent = ''; return; }
+      var bits = [];
+      if (q.rr_t1 !== null && q.rr_t1 !== undefined) bits.push('R:R to target 1 ' + PG.num(q.rr_t1) + 'R (minimum ' + PQ_CFG.min_rr_t1 + 'R)');
+      if (q.rr_t2 !== null && q.rr_t2 !== undefined) bits.push('to target 2 ' + PG.num(q.rr_t2) + 'R');
+      if (q.t1_atr !== null && q.t1_atr !== undefined) bits.push('target 1 is ' + PG.num(q.t1_atr, 1) + ' ATR away (minimum ' + PQ_CFG.min_target_atr + ')');
+      if (q.faults && q.faults.length) {
+        box.className = 'pg-muted';
+        box.style.color = 'var(--down)';
+        box.textContent = 'Plan will be BLOCKED: ' + q.faults.join('; ') + '. Enter a real target, leave it empty, or override when asked.';
+      } else {
+        box.style.color = '';
+        box.className = 'pg-muted';
+        box.textContent = bits.length ? 'Plan check: ' + bits.join(' · ') + ' — passes the gate.' : '';
+      }
+    } catch (e) {
+      if (seq === pqReq) { box.textContent = ''; box.style.color = ''; }
     }
   }
 
@@ -665,8 +755,9 @@
         // Open-heat cap: the backend blocks and asks for an explicit override.
         var msg = err && err.message ? String(err.message) : '';
         if (msg.indexOf('BLOCKED') === 0 || msg.indexOf('open-heat') !== -1) {
-          if (!window.confirm(msg + '\n\nOverride the cap and open it anyway?')) {
-            PG.notify('Position not opened (open-heat cap).', 'info');
+          var isPlan = msg.indexOf('plan does not pay') !== -1;
+          if (!window.confirm(msg + '\n\n' + (isPlan ? 'Record it anyway with this target? (The override is written into the position\'s warnings.)' : 'Override the cap and open it anyway?'))) {
+            PG.notify(isPlan ? 'Position not opened (plan-quality gate).' : 'Position not opened (open-heat cap).', 'info');
             return;
           }
           body.allow_override = true;
@@ -685,10 +776,77 @@
         warns.forEach(function (w) { PG.notify('⚠ ' + w, 'error'); });
       }
       $('posForm').reset();
+      $('posFormMsg').textContent = ''; $('posFormMsg').style.color = '';
       refreshPortfolio();
     } catch (e) {
       PG.notify('Open position failed: ' + (e && e.message ? e.message : e), 'error');
     } finally { btn.disabled = false; }
+  }
+
+  /* ---------- corporate actions ---------- */
+
+  var CA_LABEL = { dividend: 'ex-dividend', split: 'split', rights: 'rights issue', capital_increase: 'capital increase', bonus: 'bonus shares', other: 'event' };
+
+  async function loadActions() {
+    var box = $('caBox');
+    PG.loading(box, 'Loading upcoming events…');
+    try {
+      var d = await PG.api('get', '/api/corporate-actions?days=60&mine=true');
+      box.innerHTML = '';
+      var rows = d.upcoming || [];
+      box.appendChild(PG.mk('div', { class: 'pg-muted', style: 'font-size:12px;margin-bottom:6px' },
+        [rows.length + ' upcoming event' + (rows.length === 1 ? '' : 's') + ' in the next 60 days on stocks you hold or watch.']));
+      if (!rows.length) {
+        box.appendChild(PG.mk('div', { class: 'pg-muted' }, ['None recorded. Yahoo only reports dividends after the fact, so an ex-date you know about goes in the form above.']));
+        return;
+      }
+      box.appendChild(PG.table(rows, {
+        onRow: PG.openStock,
+        columns: [
+          { key: 'ex_date', label: 'Ex-date', numeric: false },
+          { key: 'days_until', label: 'In (days)', numeric: true, render: function (r) { return PG.mk('span', { class: 'badge ' + (r.days_until <= 5 ? 'down' : 'neutral') }, [String(r.days_until)]); } },
+          { key: 'symbol', label: 'Symbol', numeric: false },
+          { key: 'type', label: 'Type', numeric: false, render: function (r) { return PG.mk('span', {}, [CA_LABEL[r.type] || r.type]); } },
+          { key: 'amount', label: 'Amount (EGP)', numeric: true },
+          { key: 'ratio', label: 'Ratio', numeric: true },
+          { key: 'note', label: 'Note', numeric: false },
+          { key: 'source', label: 'Source', numeric: false },
+          { key: 'id', label: '', numeric: false, render: function (r) {
+            if (r.source !== 'manual') return PG.mk('span', { class: 'pg-muted', style: 'font-size:11px' }, ['auto']);
+            var b = PG.mk('button', { type: 'button', class: 'pg-btn secondary', style: 'padding:2px 8px;font-size:11px' }, ['Remove']);
+            b.addEventListener('click', function (ev) { ev.stopPropagation(); removeAction(r); });
+            return b;
+          } }
+        ]
+      }));
+    } catch (e) {
+      PG.errBox(box, 'Corporate actions failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function submitAction(ev) {
+    ev.preventDefault();
+    var body = { symbol: String($('caSymbol').value || '').replace(/^EGX:/i, '').trim().toUpperCase(), type: $('caType').value,
+                 ex_date: $('caDate').value, note: String($('caNote').value || '') };
+    if ($('caAmount').value !== '') body.amount = Number($('caAmount').value);
+    if ($('caRatio').value !== '') body.ratio = Number($('caRatio').value);
+    if (!body.symbol || !body.ex_date) { PG.notify('Symbol and ex-date are required', 'error'); return; }
+    var btn = $('caBtn'); btn.disabled = true;
+    try {
+      var res = await PG.api('post', '/api/corporate-actions', body);
+      PG.notify('Recorded ' + (CA_LABEL[res.type] || res.type) + ' for ' + res.symbol + ' on ' + res.ex_date, 'success');
+      $('caForm').reset();
+      loadActions();
+    } catch (e) { PG.notify('Could not record: ' + (e && e.message ? e.message : e), 'error'); }
+    finally { btn.disabled = false; }
+  }
+
+  async function removeAction(row) {
+    try {
+      await PG.api('del', '/api/corporate-actions/' + encodeURIComponent(row.id));
+      PG.notify('Removed ' + row.symbol + ' ' + (CA_LABEL[row.type] || row.type) + ' ' + row.ex_date, 'success');
+      loadActions();
+    } catch (e) { PG.notify('Remove failed: ' + (e && e.message ? e.message : e), 'error'); }
   }
 
   /* ---------- alert rules ---------- */
@@ -913,10 +1071,14 @@
     $('pSymbol').addEventListener('change', fillPlanDefaults);
     $('pEntry').addEventListener('change', fillPlanDefaults);
     AUTO_FIELDS.forEach(function (id) { $(id).addEventListener('input', function () { markManual(id); }); });
+    ['pEntry', 'pStop', 'pT1', 'pT2'].forEach(function (id) { $(id).addEventListener('change', previewPlanQuality); });
     $('posForm').addEventListener('reset', function () {
       AUTO_FIELDS.forEach(function (id) { $(id).dataset.auto = ''; });
     });
     $('ruleForm').addEventListener('submit', submitRule);
+    $('caForm').addEventListener('submit', submitAction);
+    if (window.attachAutocomplete) attachAutocomplete($('caSymbol'));
+    loadActions();
     $('evalBtn').addEventListener('click', evaluateNow);
     $('guardRunBtn').addEventListener('click', runGuardian);
     buildRuleTypePicker();

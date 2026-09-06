@@ -29,7 +29,7 @@
       <div class="grid grid-main">
         <div style="min-width:0">
           <div class="card">
-            <div class="card-title"><span>Price · 1Y daily</span><span class="as-of muted" id="chart-note"></span></div>
+            <div class="card-title"><span>Price · 1Y daily</span><span style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span id="chart-legend" class="chart-legend" title="Indicator toggles — remembered in this browser"></span><span id="chart-events"></span><span class="as-of muted" id="chart-note"></span></span></div>
             <div class="chart-box" id="chart"><div class="loading-pill">Loading chart…</div></div>
           </div>
 
@@ -94,7 +94,7 @@
           </div>
 
           <div class="card">
-            <div class="card-title"><span>Chart patterns</span><span class="as-of muted" id="pat-asof"></span></div>
+            <div class="card-title"><span>Chart patterns</span><span style="display:flex;gap:8px;align-items:center"><select id="pat-view" class="btn small" title="Which pattern types to show, by their measured record on five years of EGX history (Proven edge table)"><option value="proven">Proven only</option><option value="not_negative">Hide negative</option><option value="all">Show all</option></select><span class="as-of muted" id="pat-asof"></span></span></div>
             <div id="pat-box"><div class="loading-pill">Scanning…</div></div>
           </div>
 
@@ -107,6 +107,7 @@
             <div class="form-row" style="margin-bottom:10px">
               <div class="field"><label>Entry</label><input type="number" id="ps-entry" step="0.01"></div>
               <div class="field"><label>Stop</label><input type="number" id="ps-stop" step="0.01"></div>
+              <div class="field"><label>Target 1</label><input type="number" id="ps-t1" step="0.01" title="Auto-filled from the trade plan. The ledger blocks a target under the minimum reward-to-risk or inside one ATR of entry."></div>
             </div>
             <button class="btn primary" id="ps-btn">Size position</button>
             <div id="ps-result" style="margin-top:10px"></div>
@@ -133,7 +134,7 @@
   var SYMBOL = (new URLSearchParams(window.location.search).get("symbol") || "")
     .trim().toUpperCase().replace(/^EGX:/, "");
 
-  var state = { detail: null, plan: null, position: null, patterns: null, levels: null, inWatchlist: false, tabLoaded: {} };
+  var state = { detail: null, plan: null, position: null, patterns: null, levels: null, inWatchlist: false, tabLoaded: {}, actions: null };
 
   var ENTRY_KEYS = ["entry", "entry_price", "buy_price", "buy_at", "entry_level", "buy"];
   var STOP_KEYS = ["stop", "stop_loss", "sl", "stoploss", "stop_price", "stop_level"];
@@ -166,6 +167,7 @@
     // Sizer defaults come from .env (ACCOUNT_SIZE / RISK_PCT), not a
     // hardcoded 100,000 — a wrong account size silently mis-sizes every trade.
     API.get("/api/portfolio/config").then(function (cfg) {
+      if (cfg && cfg.guardian_atr_mult) { state.guardianAtrMult = Number(cfg.guardian_atr_mult); applyPlanOverlays(); }
       if (cfg && isFinite(Number(cfg.account_size))) {
         document.getElementById("ps-account").value = Number(cfg.account_size);
       }
@@ -235,6 +237,9 @@
       prefillSizer();
       loadPosition();
       loadPatterns();
+      loadActions();
+      var patSel = document.getElementById("pat-view");
+      if (patSel) patSel.addEventListener("change", function () { try { localStorage.setItem(PAT_VIEW_KEY, patSel.value); } catch (e) {} loadPatterns(); });
     }).catch(function (e) {
       U.clear(scoreBox).appendChild(U.errorBox("Analysis: " + e.message));
       U.clear(planBox).appendChild(U.errorBox("Trade plan: " + e.message));
@@ -344,6 +349,17 @@
       head.appendChild(el("span", { style: "font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:600", text: c.score + "/6" }));
       box.appendChild(head);
       box.appendChild(el("div", { style: "font-size:13.5px;margin-bottom:10px", text: c.headline }));
+      // Market regime: the seventh voice. It can hold a SETUP back (bear tape → WATCH),
+      // never promote one, and the pillar count above stays the stock's own.
+      var mk = c.market || null;
+      if (mk && mk.text) {
+        var mkCls = mk.state === "bull" ? "up" : (mk.state === "bear" ? "sell" : "neutral");
+        var mkLabel = mk.state === "bull" ? "BULL TAPE" : (mk.state === "bear" ? "BEAR TAPE" : (mk.state === "neutral" ? "MIXED TAPE" : "REGIME ?"));
+        var mkRow = el("div", { style: "display:flex;align-items:flex-start;gap:8px;margin:-4px 0 10px;font-size:12px" });
+        mkRow.appendChild(el("span", { class: "badge " + mkCls, text: mkLabel, title: "Market regime from EGX30 vs its 50-day average and breadth" }));
+        mkRow.appendChild(el("span", { class: mk.applied ? "warn-text" : "muted", text: mk.text + (mk.applied ? " Verdict held back from SETUP to WATCH because of the tape." : "") }));
+        box.appendChild(mkRow);
+      }
       var list = el("div", { class: "check-list" });
       (c.pillars || []).forEach(function (p) {
         var row = el("div", { class: "check-row" });
@@ -429,6 +445,28 @@
     });
   }
 
+  /* ---------- corporate actions (ex-dates, splits, rights) ---------- */
+
+  var ACTION_LABEL = { dividend: "ex-div", split: "split", rights: "rights", capital_increase: "cap. increase", bonus: "bonus", other: "event" };
+
+  function loadActions() {
+    API.get("/api/stocks/" + encodeURIComponent(SYMBOL) + "/corporate-actions").then(function (a) {
+      state.actions = a && Array.isArray(a.events) ? a.events : [];
+      var note = document.getElementById("chart-events");
+      if (note) {
+        note.textContent = "";
+        if (a && a.next) {
+          var n = a.next;
+          note.appendChild(el("span", { class: "badge neutral", text: (ACTION_LABEL[n.type] || n.type) + " " + n.ex_date + (n.amount !== null && n.amount !== undefined ? " · " + fmtNum(n.amount) + " EGP" : ""), title: a.warning || "" }));
+        } else if (state.actions.length) {
+          var last = state.actions[state.actions.length - 1];
+          note.appendChild(el("span", { class: "muted", style: "font-size:11px", text: state.actions.length + " past event" + (state.actions.length === 1 ? "" : "s") + " · last " + (ACTION_LABEL[last.type] || last.type) + " " + last.ex_date, title: "Dividends and splits from Yahoo plus anything you recorded on the Portfolio page. Marked on the chart." }));
+        }
+      }
+      applyPlanOverlays();
+    }).catch(function () { state.actions = []; });
+  }
+
   /* ---------- chart patterns ---------- */
 
   // "confirmed" is a fact about the PAST — this pattern's own trigger has already
@@ -440,9 +478,40 @@
     forming: "The shape is complete but its trigger has not been broken yet. Nothing has happened; the trigger price is what to watch."
   };
 
+  // Which pattern types the card shows, by their measured verdict (Proven edge):
+  // "proven" (default) = edge at the type's reference horizon; "not_negative" hides
+  // only the types that did worse than a random entry; "all" = the whole catalog.
+  var PAT_VIEW_KEY = "egxde.patterns.view";
+  var EDGE_CHIP = { edge: ["proven", "up", "This pattern type beat a random entry on 5y of EGX history at its reference horizon (Proven edge)"],
+                    marginal: ["unproven", "neutral", "Coin flip on EGX history: indistinguishable from a random entry"],
+                    negative: ["negative", "sell", "Did WORSE than a random entry on EGX history: not evidence"],
+                    unmeasured: ["unmeasured", "", "Too few graded samples to judge yet"] };
+  function patView() {
+    var v = null;
+    try { v = localStorage.getItem(PAT_VIEW_KEY); } catch (e) { v = null; }
+    return (v === "proven" || v === "not_negative" || v === "all") ? v : "proven";
+  }
+  function edgeChip(r) {
+    var spec = EDGE_CHIP[r.edge_verdict] || EDGE_CHIP.unmeasured;
+    var txt = spec[0] + (r.edge_horizon ? " " + r.edge_horizon + "d" : "");
+    var tip = spec[2] + (r.edge_n ? " · " + r.edge_n + " samples" : "") + (r.edge_metric !== null && r.edge_metric !== undefined ? " · " + (r.edge_metric >= 0 ? "+" : "") + fmtNum(r.edge_metric, 2) + "% excess" : "");
+    return el("span", { class: "badge " + spec[1], text: txt, title: tip, style: "font-size:10px" });
+  }
+  function hiddenText(p) {
+    var hb = (p && p.hidden_by_verdict) || {};
+    var parts = [];
+    if (hb.marginal) parts.push(hb.marginal + " unproven");
+    if (hb.negative) parts.push(hb.negative + " negative");
+    if (hb.unmeasured) parts.push(hb.unmeasured + " unmeasured");
+    return parts.length ? parts.join(", ") + " hidden by the " + (p.view === "proven" ? "Proven only" : "Hide negative") + " view" : "";
+  }
+
   function loadPatterns() {
     var box = document.getElementById("pat-box");
-    API.get("/api/stocks/" + encodeURIComponent(SYMBOL) + "/patterns").then(function (p) {
+    var view = patView();
+    var sel = document.getElementById("pat-view");
+    if (sel) sel.value = view;
+    API.get("/api/stocks/" + encodeURIComponent(SYMBOL) + "/patterns?view=" + encodeURIComponent(view)).then(function (p) {
       var rows = p && Array.isArray(p.patterns) ? p.patterns : [];
       state.patterns = rows;
       U.setAsOf(document.getElementById("pat-asof"), p && p.as_of);
@@ -452,7 +521,14 @@
         return;
       }
       if (!rows.length) {
-        box.appendChild(el("div", { class: "muted", text: "No chart shape, candlestick or price-action pattern on the daily chart right now." }));
+        var hidden = hiddenText(p);
+        box.appendChild(el("div", { class: "muted", text: (hidden ? "No proven pattern on this chart right now: " + hidden + "." : "No chart shape, candlestick or price-action pattern on the daily chart right now.") }));
+        if (hidden) {
+          var showAll = el("button", { class: "btn small", style: "margin-top:6px", text: "Show all" });
+          showAll.addEventListener("click", function () { try { localStorage.setItem(PAT_VIEW_KEY, "all"); } catch (e) {} loadPatterns(); });
+          box.appendChild(showAll);
+        }
+        applyPlanOverlays();
         return;
       }
       // One market event can arrive as several rows (False Breakout + Bull Trap, HH/HL + BOS…).
@@ -501,7 +577,7 @@
       box.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:4px", text: [
         countTxt(nBull, "bullish fact", framBull),
         countTxt(nBear, "bearish event", framBear),
-        nNeu ? nNeu + " neutral" : null].filter(Boolean).join(" · ") + (rows.length > events.length ? " · " + rows.length + " rows" : "") }));
+        nNeu ? nNeu + " neutral" : null].filter(Boolean).join(" · ") + (rows.length > events.length ? " · " + rows.length + " rows" : "") + (hiddenText(p) ? " · " + hiddenText(p) : "") }));
       var dl0 = p && p.decisive_level;
       if (dl0 && dl0.level !== null && dl0.level !== undefined) {
         var pct = dl0.pct_away, below = pct < 0;
@@ -544,6 +620,8 @@
         head.appendChild(el("strong", { text: r.label + (r.broke === "up" ? " ↑ broke up" : (r.broke === "down" ? " ↓ broke down" : "")) }));
         head.appendChild(el("span", { class: "badge " + (r.direction === "bullish" ? "buy" : (r.direction === "bearish" ? "sell" : "neutral")), text: r.direction }));
         head.appendChild(el("span", { class: "badge " + (r.status === "confirmed" ? "up" : "neutral"), text: r.status, title: STATUS_TIP[r.status] || "" }));
+        head.appendChild(edgeChip(r));
+        if (r.suspect) head.appendChild(el("span", { class: "badge sell", style: "font-size:10px", text: "event gap", title: r.suspect }));
         if (ev.members.length) head.appendChild(el("span", { class: "muted pat-also", text: "also: " + ev.members.map(function (m) { return m.label; }).join(", ") }));
         head.appendChild(el("span", { class: "muted pat-gist", text: gistOf(r) }));
         item.appendChild(head);
@@ -556,6 +634,7 @@
             var mh = el("summary", { class: "pat-summary" });
             mh.appendChild(el("strong", { text: m.label }));
             mh.appendChild(el("span", { class: "badge " + (m.status === "confirmed" ? "up" : "neutral"), text: m.status, title: STATUS_TIP[m.status] || "" }));
+            mh.appendChild(edgeChip(m));
             mh.appendChild(el("span", { class: "muted pat-gist", text: gistOf(m) }));
             mi.appendChild(mh);
             mi.appendChild(rowBody(m));
@@ -575,7 +654,7 @@
         });
         box.appendChild(more);
       }
-      box.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:8px", text: "Chart shapes are drawn on the chart (neckline + target). A finder, not a judge — the break with volume is the signal." }));
+      box.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:8px", text: "Chart shapes are drawn on the chart (neckline + target). A finder, not a judge — the break with volume is the signal. Chips: proven / unproven / negative = the pattern type's record on 5y of EGX history (Proven edge)." }));
       applyPlanOverlays();
     }).catch(function (e) {
       U.clear(box).appendChild(el("div", { class: "muted", text: "Patterns unavailable: " + e.message }));
@@ -634,6 +713,16 @@
       var txt = String(sig);
       var cls = /buy|bull|strong/i.test(txt) ? "buy" : (/sell|bear|weak/i.test(txt) ? "sell" : "neutral");
       host.appendChild(el("span", { class: "badge " + cls, text: txt }));
+    }
+    // Relative volume of the last completed session vs its 20-day median: the
+    // number that decides whether a breakout has anything behind it.
+    var vol = detail && detail.volume;
+    if (vol && vol.rvol !== null && vol.rvol !== undefined) {
+      var rv = Number(vol.rvol);
+      var rcls = rv >= 1.5 ? "up" : (rv < 0.7 ? "sell" : "neutral");
+      var label = rv >= 1.5 ? "heavy" : (rv < 0.7 ? "quiet" : "normal");
+      host.appendChild(el("span", { class: "badge " + rcls, style: "margin-left:6px", text: "RVOL " + fmtNum(rv, 1) + "× · " + label,
+        title: "Relative volume: " + (vol.volume ? Math.round(vol.volume).toLocaleString() : "?") + " shares on " + (vol.as_of || "the last session") + " vs a 20-day median of " + (vol.median_volume_20d ? Math.round(vol.median_volume_20d).toLocaleString() : "?") + ". Heavy = at least 1.5x, quiet = under 0.7x." }));
     }
   }
 
@@ -974,7 +1063,20 @@
       var clash = kept.some(function (k) { return Math.abs(k.price - o.price) / Math.max(1e-9, k.price) < 0.003; });
       if (!clash) kept.push(o);
     });
-    Charts.renderCandles("chart", chartCandles, kept);
+    // Indicators: the averages the Trend pillar cites, RVOL-coloured volume and,
+    // for a stock you hold, the Guardian's chandelier trail from your entry date.
+    var held = (state.position || [])[0];
+    var since = held && held.opened_at ? String(held.opened_at).slice(0, 10) : null;
+    var markers = (state.actions || []).map(function (a) {
+      return { time: a.ex_date, text: (ACTION_LABEL[a.type] || a.type) + (a.amount !== null && a.amount !== undefined ? " " + fmtNum(a.amount) : ""),
+               color: a.type === "dividend" ? "#D2A44C" : "#C77DFF", shape: "circle", position: "aboveBar" };
+    });
+    Charts.renderCandles("chart", chartCandles, kept, {
+      indicators: true,
+      legendEl: "chart-legend",
+      chandelier: since ? { since: since, atrMult: state.guardianAtrMult || 2.5 } : null,
+      markers: markers,
+    });
   }
 
   /** Extract [{label, price}] from whatever shape the fibonacci payload takes. */
@@ -1464,6 +1566,7 @@
     var lv = planLevels(state.plan);
     if (lv.entry !== null && !document.getElementById("ps-entry").value) document.getElementById("ps-entry").value = lv.entry;
     if (lv.stop !== null && !document.getElementById("ps-stop").value) document.getElementById("ps-stop").value = lv.stop;
+    if (lv.t1 !== null && lv.t1 !== undefined && !document.getElementById("ps-t1").value) document.getElementById("ps-t1").value = lv.t1;
   }
 
   function sizePosition() {
@@ -1472,6 +1575,8 @@
     var risk = parseFloat(document.getElementById("ps-risk").value);
     var entry = parseFloat(document.getElementById("ps-entry").value);
     var stop = parseFloat(document.getElementById("ps-stop").value);
+    var t1raw = document.getElementById("ps-t1").value;
+    var t1 = t1raw === "" ? null : parseFloat(t1raw);
     if (!isFinite(account) || !isFinite(risk) || !isFinite(entry) || !isFinite(stop)) {
       U.clear(box).appendChild(U.errorBox("Fill account, risk %, entry and stop first."));
       return;
@@ -1479,7 +1584,7 @@
     var btn = document.getElementById("ps-btn");
     btn.disabled = true;
     U.clear(box).appendChild(U.loadingPill("Sizing…"));
-    API.post("/api/portfolio/size", { account: account, risk_pct: risk, entry: entry, stop: stop, symbol: SYMBOL }).then(function (r) {
+    API.post("/api/portfolio/size", { account: account, risk_pct: risk, entry: entry, stop: stop, symbol: SYMBOL, target1: (t1 !== null && isFinite(t1)) ? t1 : null }).then(function (r) {
       U.clear(box);
       var shares = U.pickNum(r, ["shares", "qty", "quantity", "position_size"]);
       var riskAmt = U.pickNum(r, ["risk_amount", "riskAmount", "risk"]);
@@ -1488,6 +1593,16 @@
       dl.appendChild(el("dt", { text: "Shares" })); dl.appendChild(el("dd", { text: shares === null ? "—" : fmtNum(shares, 0) }));
       dl.appendChild(el("dt", { text: "Risk amount" })); dl.appendChild(el("dd", { text: riskAmt === null ? "—" : fmtNum(riskAmt) + " EGP" }));
       dl.appendChild(el("dt", { text: "Position cost" })); dl.appendChild(el("dd", { text: cost === null ? "—" : fmtNum(cost) + " EGP" }));
+      // R:R to target 1 — the same gate the ledger applies when you record the trade.
+      var q = r && r.plan_quality;
+      if (q && q.checked) {
+        var bad = q.faults && q.faults.length;
+        var rrTxt = (q.rr_t1 !== null && q.rr_t1 !== undefined ? fmtNum(q.rr_t1, 2) + "R" : "—")
+          + (q.t1_atr !== null && q.t1_atr !== undefined ? " · " + fmtNum(q.t1_atr, 1) + " ATR away" : "")
+          + (bad ? " — below the " + q.min_rr_t1 + "R / " + q.min_target_atr + " ATR minimum: the ledger will block this plan" : " — passes the gate");
+        dl.appendChild(el("dt", { text: "R:R to target 1" }));
+        dl.appendChild(el("dd", { class: bad ? "down" : "up", text: rrTxt, title: bad ? q.faults.join("; ") : "Reward-to-risk against the initial stop, and the target's distance in 14-day ATRs" }));
+      }
       box.appendChild(dl);
       var note = U.pick(r, ["risk_reward_note", "note", "warning", "message"]);
       if (note !== null && note !== undefined && typeof note !== "object") {
